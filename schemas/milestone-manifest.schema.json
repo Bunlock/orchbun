@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orchbun.local/schemas/milestone-manifest-v1.schema.json",
+  "title": "Orchbun approved milestone manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "milestone", "scope", "review", "summary",
+    "validated_outcomes", "decisions", "contracts", "risks",
+    "pending_work", "artifacts", "supersedes"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "milestone": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$" },
+    "scope": { "const": "shared" },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "accepted_at", "accepted_by"],
+      "properties": {
+        "decision": { "const": "accepted" },
+        "accepted_at": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "accepted_by": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "validated_outcomes": { "$ref": "#/$defs/shortStrings" },
+    "decisions": { "$ref": "#/$defs/shortStrings" },
+    "contracts": { "$ref": "#/$defs/shortStrings" },
+    "risks": { "$ref": "#/$defs/shortStrings" },
+    "pending_work": { "$ref": "#/$defs/shortStrings" },
+    "supersedes": { "$ref": "#/$defs/shortStrings" },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "description"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "shortStrings": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    }
+  }
+}

@@ -24,6 +24,7 @@ const WORKING_FILES = [
   "working/project-state.md",
   "working/active-tasks.md",
   "working/decisions.md",
+  "working/contracts.md",
   "working/risks.md",
 ] as const;
 

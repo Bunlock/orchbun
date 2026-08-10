@@ -4,6 +4,7 @@ import path from "node:path";
 import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
 import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
+import { compactMemory } from "./milestone-memory.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
 import type { AgentKind, RunMode } from "./types.js";
 
@@ -13,6 +14,7 @@ Usage:
   orchbun run --agent AGENT --prompt TEXT [--task ID] [--mode review|work]
   orchbun delegate --agent AGENT --prompt TEXT [--mode review|work]
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
+  orchbun /compact milestone=NAME scope=shared [--manifest PATH]
   orchbun memory init|show|runs|rebuild|verify
 
 Options:
@@ -60,6 +62,11 @@ function option(args: ParsedArgs, name: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function assignment(args: ParsedArgs, name: string): string | undefined {
+  const prefix = `${name}=`;
+  return args.positional.slice(1).find((value) => value.startsWith(prefix))?.slice(prefix.length);
+}
+
 async function sourcePrompt(args: ParsedArgs, root: string): Promise<string> {
   const direct = option(args, "prompt");
   const file = option(args, "prompt-file");
@@ -97,6 +104,19 @@ async function main(): Promise<void> {
     : await findWorkspaceRoot(process.env.ORCHBUN_ROOT ?? process.cwd());
   const config = await loadConfig(root);
   const orchestrator = new Orchestrator(root, config);
+
+  if (command === "/compact" || command === "compact") {
+    await orchestrator.journal.initialize();
+    const milestone = option(args, "milestone") ?? assignment(args, "milestone");
+    const scope = option(args, "scope") ?? assignment(args, "scope");
+    if (!milestone || !scope) throw new Error("Usage: orchbun /compact milestone=<name> scope=shared [--manifest PATH]");
+    const manifest = option(args, "manifest")
+      ? path.resolve(root, option(args, "manifest")!)
+      : path.join(orchestrator.journal.memoryRoot, "milestones", milestone, "approved.yaml");
+    const receipt = await compactMemory(orchestrator.journal, manifest, milestone, scope);
+    console.log(args.options.has("json") ? JSON.stringify(receipt) : `${receipt.milestone} compacted → ${receipt.archivePath}`);
+    return;
+  }
 
   if (command === "memory") {
     await orchestrator.journal.initialize();
@@ -137,7 +157,7 @@ async function main(): Promise<void> {
     if (subcommand === "show") {
       await rebuildMemory(orchestrator.journal);
       const working = path.join(memoryRoot(root, config), "working");
-      for (const file of ["project-state.md", "active-tasks.md", "decisions.md", "risks.md"]) {
+      for (const file of ["project-state.md", "active-tasks.md", "decisions.md", "contracts.md", "risks.md"]) {
         console.log(await readFile(path.join(working, file), "utf8"));
       }
       return;

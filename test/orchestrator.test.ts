@@ -69,7 +69,7 @@ test("records linked parent and child runs without a provider call", async () =>
   assert.equal(codex.capturedEnvironment?.ORCHBUN_MODE, "work");
   assert.equal(claude.capturedEnvironment?.ORCHBUN_DEPTH, "1");
   assert.equal(await readFile(path.join(child.runDirectory, "prompt.md"), "utf8"), "Review the proposed change.");
-  assert.deepEqual(await verifyMemory(orchestrator.journal), { runs: 2, directNotes: 0, issues: [] });
+  assert.deepEqual(await verifyMemory(orchestrator.journal), { runs: 2, directNotes: 0, compactArchives: 0, issues: [] });
 });
 
 test("refreshes direct memory before building managed context", async () => {

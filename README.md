@@ -59,6 +59,44 @@ memory before showing memory or building managed-agent context. An optional `Sup
 field can name earlier direct-note IDs whose current decisions, risks, and next actions should
 be retired while their history remains indexed.
 
+## Accepted milestone compaction
+
+Compaction is a post-review gate. Review writes
+`memory/agents/milestones/<name>/approved.yaml`; `/compact` refuses any manifest whose review
+decision is not `accepted`, and it never summarizes raw provider conversation. The manifest
+records the accepted summary, validated outcomes, durable decisions, APIs/contracts, risks,
+pending work, artifact references, and any exact prior memory items superseded by the milestone.
+
+```yaml
+schema_version: "1.0"
+milestone: hex-a3
+scope: shared
+review:
+  decision: accepted
+  accepted_at: 2026-08-10T14:00:00Z
+  accepted_by: gameplay-review
+summary: Deterministic replay is accepted.
+validated_outcomes: [Golden replay vector passes.]
+decisions: [Use mulberry32 for replay seeds.]
+contracts: [Replay consumes the append-only action log.]
+risks: [Old saves need a version adapter.]
+pending_work: [Plan persistence integration.]
+artifacts:
+  - path: packages/sim-battle/src/seeded-random.ts
+    description: Canonical PRNG implementation.
+supersedes: []
+```
+
+Publish it with:
+
+```sh
+pnpm orchbun /compact milestone=hex-a3 scope=shared
+```
+
+The command stages a complete replacement, archives the prior `working/` tree with the approved
+manifest and publication receipt, then swaps in the milestone baseline under the memory lock.
+Subsequent rebuilds retain that baseline and ingest only records created after compaction.
+
 ## Maintenance
 
 ```sh

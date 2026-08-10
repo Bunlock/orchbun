@@ -3,7 +3,9 @@ import path from "node:path";
 import YAML from "yaml";
 import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { metadataFromYaml, RunJournal } from "./journal.js";
+import { loadApprovedMilestoneManifest, loadCompactArchives, readCompactState, renderCompactProjectState } from "./milestone-memory.js";
 import type { AgentResult, RunMetadata } from "./types.js";
+import { contentHash } from "./utils.js";
 
 interface RecordedRun {
   directory: string;
@@ -14,6 +16,7 @@ interface RecordedRun {
 export interface VerifyReport {
   runs: number;
   directNotes: number;
+  compactArchives: number;
   issues: string[];
 }
 
@@ -64,7 +67,10 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
   const runs = await loadRuns(journal);
   const direct = await loadDirectMemory(journal.memoryRoot);
   assertValidDirectMemory(direct);
-  const completed = runs.filter((run) => run.result);
+  const compact = await readCompactState(journal.memoryRoot);
+  const includedRunIds = new Set(compact?.includedManagedRunIds ?? []);
+  const includedDirectIds = new Set(compact?.includedDirectNoteIds ?? []);
+  const completed = runs.filter((run) => run.result && !includedRunIds.has(run.metadata.runId));
   const managedProjections: ProjectionRecord[] = completed.map((run) => ({
       startedAt: run.metadata.startedAt,
       stateLabel: `${run.metadata.agent}${run.metadata.taskId ? ` ${run.metadata.taskId}` : ""}`,
@@ -75,7 +81,7 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
       risks: [...run.result!.risks, ...run.result!.blockers],
       nextActions: run.result!.next_actions,
     }));
-  const directProjections = new Map(direct.notes.map((note) => [note.id, {
+  const directProjections = new Map(direct.notes.filter((note) => !includedDirectIds.has(note.id)).map((note) => [note.id, {
       startedAt: note.timestamp,
       stateLabel: `direct ${note.slug}`,
       summary: note.outcome,
@@ -104,8 +110,12 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
   });
 
   const unique = (values: string[]): string[] => [...new Map(values.map((value) => [value.trim().toLowerCase(), value.trim()])).values()];
-  const decisions = unique(currentProjections.flatMap((record) => record.decisions));
-  const risks = unique(currentProjections.flatMap((record) => record.risks));
+  const decisions = unique([...(compact?.baseline.decisions ?? []), ...currentProjections.flatMap((record) => record.decisions)]);
+  const risks = unique([...(compact?.baseline.risks ?? []), ...currentProjections.flatMap((record) => record.risks)]);
+  const projectState = compact
+    ? `${renderCompactProjectState(compact).trim()}${stateLines.length ? `\n\n## Since compaction\n\n${stateLines.join("\n")}` : ""}\n`
+    : `# Project state\n\n${stateLines.join("\n") || "No completed managed runs or direct notes."}\n`;
+  const baselineTasks = compact?.baseline.pendingWork.map((item) => `- ${item}`) ?? [];
   const links = [
     ...runs.map((run) => {
       const relative = path.relative(journal.memoryRoot, run.directory).split(path.sep).join("/");
@@ -122,9 +132,10 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
   ].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-30).reverse().map((entry) => entry.line);
 
   await Promise.all([
-    writeFile(path.join(journal.memoryRoot, "working", "project-state.md"), `# Project state\n\n${stateLines.join("\n") || "No completed managed runs or direct notes."}\n`),
-    writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), `# Active tasks\n\n${taskLines.join("\n") || "No task-linked memory records."}\n`),
+    writeFile(path.join(journal.memoryRoot, "working", "project-state.md"), projectState),
+    writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), `# Active tasks\n\n${[...baselineTasks, ...taskLines].join("\n") || "No task-linked memory records."}\n`),
     writeFile(path.join(journal.memoryRoot, "working", "decisions.md"), `# Decisions\n\n${decisions.map((item) => `- ${item}`).join("\n") || "No decisions recorded."}\n`),
+    writeFile(path.join(journal.memoryRoot, "working", "contracts.md"), `# APIs and contracts\n\n${compact?.baseline.contracts.map((item) => `- ${item}`).join("\n") || "No APIs or contracts recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "working", "risks.md"), `# Risks and blockers\n\n${risks.map((item) => `- ${item}`).join("\n") || "No risks recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "index.md"), `# Agent runs\n\n${links.join("\n") || "No runs recorded."}\n`),
   ]);
@@ -133,7 +144,14 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
 export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
   const runs = await loadRuns(journal);
   const direct = await loadDirectMemory(journal.memoryRoot);
+  const compact = await readCompactState(journal.memoryRoot);
+  let archives: Awaited<ReturnType<typeof loadCompactArchives>> = [];
   const issues: string[] = direct.issues.map((issue) => `direct: ${issue}`);
+  try {
+    archives = await loadCompactArchives(journal.memoryRoot);
+  } catch (error) {
+    issues.push(`compact archive index: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const ids = new Set(runs.map((run) => run.metadata.runId));
   for (const run of runs) {
     try {
@@ -148,5 +166,28 @@ export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
       issues.push(`${run.metadata.runId}: missing parent ${run.metadata.parentRunId}`);
     }
   }
-  return { runs: runs.length, directNotes: direct.notes.length, issues };
+  for (const archive of archives) {
+    for (const relative of ["approved-manifest.yaml", "working/project-state.md"]) {
+      try {
+        await readFile(path.join(archive.directory, ...relative.split("/")), "utf8");
+      } catch {
+        issues.push(`compact ${archive.state.milestone}: archive is missing ${relative}`);
+      }
+    }
+    try {
+      const archivedManifest = await loadApprovedMilestoneManifest(path.join(archive.directory, "approved-manifest.yaml"));
+      if (contentHash(archivedManifest.raw) !== archive.state.manifestHash) {
+        issues.push(`compact ${archive.state.milestone}: approved manifest hash does not match publication`);
+      }
+      if (archive.state.archivePath !== archive.relativePath) {
+        issues.push(`compact ${archive.state.milestone}: publication archive path does not match its location`);
+      }
+    } catch (error) {
+      issues.push(`compact ${archive.state.milestone}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (compact && !archives.some((archive) => archive.relativePath === compact.archivePath)) {
+    issues.push(`compact ${compact.milestone}: active baseline points to a missing archive`);
+  }
+  return { runs: runs.length, directNotes: direct.notes.length, compactArchives: archives.length, issues };
 }
