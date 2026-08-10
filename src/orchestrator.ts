@@ -9,6 +9,7 @@ import type { AgentAdapter, AdapterResponse } from "./adapters/base.js";
 import { gitSnapshot, snapshotLabel } from "./git.js";
 import { RunJournal } from "./journal.js";
 import { rebuildMemory } from "./memory.js";
+import { completeRoadmapTask } from "./roadmap.js";
 import type { AgentKind, AgentResult, ContextPacket, RunMetadata, RunMode, RunStatus } from "./types.js";
 import { contentHash, newRunId } from "./utils.js";
 
@@ -112,6 +113,22 @@ export class Orchestrator {
       });
       if (response.result.task_id !== options.taskId) {
         throw new Error(`Agent returned task_id ${String(response.result.task_id)}; expected ${String(options.taskId)}`);
+      }
+
+      if (options.mode === "work" && response.result.outcome === "completed" && options.taskId) {
+        const roadmap = await completeRoadmapTask(this.root, options.taskId);
+        if (roadmap === "updated" && response.result.files_changed.length < 30) {
+          response = {
+            ...response,
+            result: {
+              ...response.result,
+              files_changed: [
+                ...response.result.files_changed,
+                { path: "ROADMAP.md", change: `Marked ${options.taskId} complete after the successful work run.` },
+              ],
+            },
+          };
+        }
       }
 
       const after = await gitSnapshot(this.root);

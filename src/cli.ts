@@ -4,7 +4,7 @@ import path from "node:path";
 import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
 import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
-import { compactMemory } from "./milestone-memory.js";
+import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
 import type { AgentKind, RunMode } from "./types.js";
 
@@ -14,8 +14,9 @@ Usage:
   orchbun run --agent AGENT --prompt TEXT [--task ID] [--mode review|work]
   orchbun delegate --agent AGENT --prompt TEXT [--mode review|work]
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
+  orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
   orchbun /compact milestone=NAME scope=shared [--manifest PATH]
-  orchbun memory init|show|runs|rebuild|verify
+  orchbun memory init|show|runs|rebuild|verify|compact
 
 Options:
   --prompt-file PATH       Read the exact source prompt from a file
@@ -92,6 +93,34 @@ function contextFiles(args: ParsedArgs): string[] {
   return option(args, "context")?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
 }
 
+async function runCompactCommand(
+  args: ParsedArgs,
+  root: string,
+  orchestrator: Orchestrator,
+  usage: string,
+): Promise<void> {
+  await orchestrator.journal.initialize();
+  const milestone = option(args, "milestone") ?? assignment(args, "milestone");
+  const scope = option(args, "scope") ?? assignment(args, "scope") ?? "shared";
+  const all = args.options.has("all") || assignment(args, "all") === "true";
+  if (all && (milestone || option(args, "manifest"))) {
+    throw new Error("Use either --all or a single --milestone/--manifest, not both");
+  }
+  if (all) {
+    const receipt = await compactAllApprovedMilestones(orchestrator.journal, scope);
+    console.log(args.options.has("json")
+      ? JSON.stringify(receipt)
+      : `Compacted ${receipt.compacted.length} milestone(s); skipped ${receipt.skipped} already published.`);
+    return;
+  }
+  if (!milestone) throw new Error(usage);
+  const manifest = option(args, "manifest")
+    ? path.resolve(root, option(args, "manifest")!)
+    : path.join(orchestrator.journal.memoryRoot, "milestones", milestone, "approved.yaml");
+  const receipt = await compactMemory(orchestrator.journal, manifest, milestone, scope);
+  console.log(args.options.has("json") ? JSON.stringify(receipt) : `${receipt.milestone} compacted → ${receipt.archivePath}`);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const [command, subcommand] = args.positional;
@@ -106,20 +135,16 @@ async function main(): Promise<void> {
   const orchestrator = new Orchestrator(root, config);
 
   if (command === "/compact" || command === "compact") {
-    await orchestrator.journal.initialize();
-    const milestone = option(args, "milestone") ?? assignment(args, "milestone");
-    const scope = option(args, "scope") ?? assignment(args, "scope");
-    if (!milestone || !scope) throw new Error("Usage: orchbun /compact milestone=<name> scope=shared [--manifest PATH]");
-    const manifest = option(args, "manifest")
-      ? path.resolve(root, option(args, "manifest")!)
-      : path.join(orchestrator.journal.memoryRoot, "milestones", milestone, "approved.yaml");
-    const receipt = await compactMemory(orchestrator.journal, manifest, milestone, scope);
-    console.log(args.options.has("json") ? JSON.stringify(receipt) : `${receipt.milestone} compacted → ${receipt.archivePath}`);
+    await runCompactCommand(args, root, orchestrator, "Usage: orchbun /compact milestone=<name> [scope=shared] [--manifest PATH] | --all");
     return;
   }
 
   if (command === "memory") {
     await orchestrator.journal.initialize();
+    if (subcommand === "compact") {
+      await runCompactCommand(args, root, orchestrator, "Usage: orchbun memory compact (--milestone <name> | --all) [--scope shared] [--manifest PATH]");
+      return;
+    }
     if (subcommand === "init") {
       await rebuildMemory(orchestrator.journal);
       console.log(orchestrator.journal.memoryRoot);
@@ -162,7 +187,7 @@ async function main(): Promise<void> {
       }
       return;
     }
-    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify");
+    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact");
   }
 
   const isDelegate = command === "delegate";

@@ -34,6 +34,10 @@ pnpm orchbun delegate --agent claude --prompt "Review the current changes"
 
 Delegates default to `review`; editing requires `--mode work`. A review-mode parent cannot delegate because its process is read-only.
 
+When a work-mode run with a task id finishes with `outcome: completed`, Orchbun atomically marks
+the matching `- [ ] **TASK-ID**` entry in `ROADMAP.md` as complete. Review runs never change the
+roadmap, and task ids not present in the roadmap are ignored.
+
 ## Recorded architecture
 
 Every managed run writes into the target workspace, not the Orchbun source directory:
@@ -90,8 +94,22 @@ supersedes: []
 Publish it with:
 
 ```sh
-pnpm orchbun /compact milestone=hex-a3 scope=shared
+pnpm orchbun memory compact --milestone hex-a3
 ```
+
+Use `--scope shared` explicitly if desired; shared is the default. Pass
+`--manifest path/to/approved.yaml` to consume a reviewed manifest outside the default milestone
+directory. The slash-style `pnpm orchbun /compact milestone=hex-a3 scope=shared` remains an alias.
+
+To compact every accepted manifest that has not already been archived:
+
+```sh
+pnpm orchbun memory compact --all
+```
+
+`--all` validates the complete set before publishing, processes it in review-acceptance order,
+and skips manifests whose content hash is already in the immutable archive. It remains
+manifest-gated; it does not compact raw conversations or unreviewed work.
 
 The command stages a complete replacement, archives the prior `working/` tree with the approved
 manifest and publication receipt, then swaps in the milestone baseline under the memory lock.
@@ -104,6 +122,8 @@ pnpm orchbun memory show
 pnpm orchbun memory runs
 pnpm orchbun memory verify
 pnpm orchbun memory rebuild
+pnpm orchbun memory compact --milestone <name> # one accepted milestone
+pnpm orchbun memory compact --all              # every unpublished accepted milestone
 ```
 
 `memory init` creates both managed and direct-memory structures. `memory show` rebuilds and

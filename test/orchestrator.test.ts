@@ -42,6 +42,7 @@ class FakeAdapter implements AgentAdapter {
 test("records linked parent and child runs without a provider call", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-orchestrator-"));
   await writeFile(path.join(root, "orchbun.yaml"), "version: 1\n");
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n\n- [ ] **HEX-2** Coordinate the review.\n");
   const codex = new FakeAdapter("codex");
   const claude = new FakeAdapter("claude");
   const orchestrator = new Orchestrator(root, DEFAULT_CONFIG, { codex, claude });
@@ -68,6 +69,10 @@ test("records linked parent and child runs without a provider call", async () =>
   assert.equal(child.metadata.parentRunId, parent.metadata.runId);
   assert.equal(codex.capturedEnvironment?.ORCHBUN_MODE, "work");
   assert.equal(claude.capturedEnvironment?.ORCHBUN_DEPTH, "1");
+  assert.match(await readFile(path.join(root, "ROADMAP.md"), "utf8"), /- \[x\] \*\*HEX-2\*\*/);
+  assert.deepEqual(parent.result.files_changed, [
+    { path: "ROADMAP.md", change: "Marked HEX-2 complete after the successful work run." },
+  ]);
   assert.equal(await readFile(path.join(child.runDirectory, "prompt.md"), "utf8"), "Review the proposed change.");
   assert.deepEqual(await verifyMemory(orchestrator.journal), { runs: 2, directNotes: 0, compactArchives: 0, issues: [] });
 });

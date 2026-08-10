@@ -62,6 +62,12 @@ export interface CompactReceipt {
   manifestHash: string;
 }
 
+export interface CompactAllReceipt {
+  requested: number;
+  compacted: CompactReceipt[];
+  skipped: number;
+}
+
 export interface CompactArchive {
   directory: string;
   relativePath: string;
@@ -176,12 +182,12 @@ export async function compactMemory(
       includedDirectNoteIds,
       baseline: {
         summary: manifest.summary,
-        validatedOutcomes: unique(manifest.validated_outcomes),
+        validatedOutcomes: unique([...(prior?.baseline.validatedOutcomes ?? []), ...manifest.validated_outcomes]),
         decisions: unique([...(carried.decisions ?? []), ...manifest.decisions]),
         contracts: unique([...(carried.contracts ?? []), ...manifest.contracts]),
         risks: unique([...(carried.risks ?? []), ...manifest.risks]),
         pendingWork: unique(manifest.pending_work),
-        artifacts: uniqueArtifacts(manifest.artifacts),
+        artifacts: uniqueArtifacts([...(prior?.baseline.artifacts ?? []), ...manifest.artifacts]),
       },
     };
 
@@ -221,6 +227,33 @@ export async function compactMemory(
       manifestHash: state.manifestHash,
     };
   });
+}
+
+export async function compactAllApprovedMilestones(
+  journal: RunJournal,
+  scope = "shared",
+): Promise<CompactAllReceipt> {
+  if (scope !== "shared") throw new Error("Only scope=shared is supported");
+  const files = await approvedManifestFiles(path.join(journal.memoryRoot, "milestones"));
+  const loaded = await Promise.all(files.map(async (file) => ({ file, ...(await loadApprovedMilestoneManifest(file)) })));
+  loaded.sort((a, b) =>
+    a.manifest.review.accepted_at.localeCompare(b.manifest.review.accepted_at)
+      || a.manifest.milestone.localeCompare(b.manifest.milestone),
+  );
+
+  const publishedHashes = new Set((await loadCompactArchives(journal.memoryRoot)).map((archive) => archive.state.manifestHash));
+  const seenHashes = new Set<string>();
+  const pending = loaded.filter(({ raw }) => {
+    const hash = contentHash(raw);
+    if (publishedHashes.has(hash) || seenHashes.has(hash)) return false;
+    seenHashes.add(hash);
+    return true;
+  });
+  const compacted: CompactReceipt[] = [];
+  for (const item of pending) {
+    compacted.push(await compactMemory(journal, item.file, item.manifest.milestone, scope));
+  }
+  return { requested: loaded.length, compacted, skipped: loaded.length - pending.length };
 }
 
 export async function writeCompactWorking(directory: string, state: CompactState): Promise<void> {
@@ -295,4 +328,24 @@ async function exists(candidate: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function approvedManifestFiles(root: string): Promise<string[]> {
+  const output: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(absolute);
+      else if (entry.isFile() && entry.name === "approved.yaml") output.push(absolute);
+    }
+  };
+  await visit(root);
+  return output.sort();
 }
