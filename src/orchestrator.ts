@@ -48,6 +48,8 @@ export class Orchestrator {
   }
 
   async context(options: RunOptions): Promise<ContextPacket> {
+    await this.journal.initialize();
+    await rebuildMemory(this.journal);
     return buildContextPacket(this.root, this.config, {
       sourcePrompt: options.sourcePrompt,
       taskId: options.taskId,
@@ -66,7 +68,6 @@ export class Orchestrator {
       throw new Error("OpenRouter cannot use work mode because it has no local file tools");
     }
 
-    await this.journal.initialize();
     const packet = await this.context(options);
     const runId = newRunId(options.agent);
     const before = await gitSnapshot(this.root);

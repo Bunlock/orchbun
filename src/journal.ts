@@ -2,6 +2,7 @@ import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/p
 import path from "node:path";
 import YAML from "yaml";
 import type { AdapterResponse } from "./adapters/base.js";
+import { DIRECT_MEMORY_PROTOCOL } from "./direct-memory.js";
 import type { AgentResult, ContextPacket, RunMetadata } from "./types.js";
 
 const PROTOCOL = `# Agent memory protocol
@@ -14,6 +15,7 @@ This directory is local, ignored by Git, and shared by managed agents.
 - Native provider output is retained without being loaded into future prompts.
 - \`result.json\` and \`summary.md\` are the normalized compact result.
 - Files under \`working/\` are generated projections. Do not edit them manually.
+- Compact direct-agent notes under \`direct/\` are validated and merged into working memory.
 - \`design/\` and old run history are never loaded automatically.
 `;
 
@@ -21,9 +23,10 @@ export class RunJournal {
   constructor(readonly memoryRoot: string) {}
 
   async initialize(): Promise<void> {
-    const directories = ["runs", "working", "locks"];
+    const directories = ["runs", "working", "locks", "direct"];
     await Promise.all(directories.map((directory) => mkdir(path.join(this.memoryRoot, directory), { recursive: true })));
     await this.writeIfMissing(path.join(this.memoryRoot, "README.md"), PROTOCOL);
+    await this.writeIfMissing(path.join(this.memoryRoot, "direct", "README.md"), DIRECT_MEMORY_PROTOCOL);
     await this.writeIfMissing(path.join(this.memoryRoot, "index.md"), "# Agent runs\n\nNo runs recorded.\n");
     await this.writeIfMissing(path.join(this.memoryRoot, "working", "project-state.md"), "# Project state\n\nNo managed runs recorded.\n");
     await this.writeIfMissing(path.join(this.memoryRoot, "working", "active-tasks.md"), "# Active tasks\n\nNo active tasks recorded.\n");

@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
+import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { metadataFromYaml, RunJournal } from "./journal.js";
 import type { AgentResult, RunMetadata } from "./types.js";
 
@@ -12,7 +13,19 @@ interface RecordedRun {
 
 export interface VerifyReport {
   runs: number;
+  directNotes: number;
   issues: string[];
+}
+
+interface ProjectionRecord {
+  startedAt: string;
+  stateLabel: string;
+  summary: string;
+  taskId: string | null;
+  outcome: string;
+  decisions: string[];
+  risks: string[];
+  nextActions: string[];
 }
 
 export async function loadRuns(journal: RunJournal): Promise<RecordedRun[]> {
@@ -49,31 +62,68 @@ export async function rebuildMemory(journal: RunJournal): Promise<void> {
 
 async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
   const runs = await loadRuns(journal);
+  const direct = await loadDirectMemory(journal.memoryRoot);
+  assertValidDirectMemory(direct);
   const completed = runs.filter((run) => run.result);
-  const recent = completed.slice(-20);
-  const stateLines = recent.map((run) => {
-    const task = run.metadata.taskId ? ` ${run.metadata.taskId}` : "";
-    return `- **${run.metadata.startedAt.slice(0, 10)} · ${run.metadata.agent}${task}:** ${run.result!.summary}`;
-  });
+  const managedProjections: ProjectionRecord[] = completed.map((run) => ({
+      startedAt: run.metadata.startedAt,
+      stateLabel: `${run.metadata.agent}${run.metadata.taskId ? ` ${run.metadata.taskId}` : ""}`,
+      summary: run.result!.summary,
+      taskId: run.metadata.taskId,
+      outcome: run.result!.outcome,
+      decisions: run.result!.decisions,
+      risks: [...run.result!.risks, ...run.result!.blockers],
+      nextActions: run.result!.next_actions,
+    }));
+  const directProjections = new Map(direct.notes.map((note) => [note.id, {
+      startedAt: note.timestamp,
+      stateLabel: `direct ${note.slug}`,
+      summary: note.outcome,
+      taskId: note.task,
+      outcome: "recorded",
+      decisions: note.decisions,
+      risks: note.risks,
+      nextActions: note.nextActions,
+    } satisfies ProjectionRecord]));
+  const projections = [...managedProjections, ...directProjections.values()]
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const supersededDirectIds = new Set(direct.notes.flatMap((note) => note.supersedes));
+  const currentProjections = [
+    ...managedProjections,
+    ...[...directProjections.entries()].filter(([id]) => !supersededDirectIds.has(id)).map(([, record]) => record),
+  ].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const stateLines = projections.slice(-20).map((record) =>
+    `- **${record.startedAt.slice(0, 10)} · ${record.stateLabel}:** ${record.summary}`,
+  );
 
-  const latestTasks = new Map<string, RecordedRun>();
-  for (const run of completed) if (run.metadata.taskId) latestTasks.set(run.metadata.taskId, run);
-  const taskLines = [...latestTasks.entries()].map(([taskId, run]) => {
-    const next = run.result!.next_actions[0] ?? "Review the latest result.";
-    return `- **${taskId} · ${run.result!.outcome}:** ${next}`;
+  const latestTasks = new Map<string, ProjectionRecord>();
+  for (const record of currentProjections) if (record.taskId && record.nextActions.length) latestTasks.set(record.taskId, record);
+  const taskLines = [...latestTasks.entries()].map(([taskId, record]) => {
+    const next = record.nextActions[0] ?? "Review the latest result.";
+    return `- **${taskId} · ${record.outcome}:** ${next}`;
   });
 
   const unique = (values: string[]): string[] => [...new Map(values.map((value) => [value.trim().toLowerCase(), value.trim()])).values()];
-  const decisions = unique(completed.flatMap((run) => run.result!.decisions));
-  const risks = unique(completed.flatMap((run) => [...run.result!.risks, ...run.result!.blockers]));
-  const links = runs.slice(-30).reverse().map((run) => {
-    const relative = path.relative(journal.memoryRoot, run.directory).split(path.sep).join("/");
-    return `- [[${relative}/summary|${run.metadata.runId}]] · ${run.metadata.agent} · ${run.metadata.status}${run.metadata.taskId ? ` · ${run.metadata.taskId}` : ""}`;
-  });
+  const decisions = unique(currentProjections.flatMap((record) => record.decisions));
+  const risks = unique(currentProjections.flatMap((record) => record.risks));
+  const links = [
+    ...runs.map((run) => {
+      const relative = path.relative(journal.memoryRoot, run.directory).split(path.sep).join("/");
+      const target = run.result ? "summary" : "metadata";
+      return {
+        startedAt: run.metadata.startedAt,
+        line: `- [[${relative}/${target}|${run.metadata.runId}]] · ${run.metadata.agent} · ${run.metadata.status}${run.metadata.taskId ? ` · ${run.metadata.taskId}` : ""}`,
+      };
+    }),
+    ...direct.notes.map((note) => ({
+      startedAt: note.timestamp,
+      line: `- [[${note.relativePath}|${note.id}]] · direct · recorded · ${note.task}`,
+    })),
+  ].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-30).reverse().map((entry) => entry.line);
 
   await Promise.all([
-    writeFile(path.join(journal.memoryRoot, "working", "project-state.md"), `# Project state\n\n${stateLines.join("\n") || "No completed managed runs."}\n`),
-    writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), `# Active tasks\n\n${taskLines.join("\n") || "No task-linked runs."}\n`),
+    writeFile(path.join(journal.memoryRoot, "working", "project-state.md"), `# Project state\n\n${stateLines.join("\n") || "No completed managed runs or direct notes."}\n`),
+    writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), `# Active tasks\n\n${taskLines.join("\n") || "No task-linked memory records."}\n`),
     writeFile(path.join(journal.memoryRoot, "working", "decisions.md"), `# Decisions\n\n${decisions.map((item) => `- ${item}`).join("\n") || "No decisions recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "working", "risks.md"), `# Risks and blockers\n\n${risks.map((item) => `- ${item}`).join("\n") || "No risks recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "index.md"), `# Agent runs\n\n${links.join("\n") || "No runs recorded."}\n`),
@@ -82,7 +132,8 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
 
 export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
   const runs = await loadRuns(journal);
-  const issues: string[] = [];
+  const direct = await loadDirectMemory(journal.memoryRoot);
+  const issues: string[] = direct.issues.map((issue) => `direct: ${issue}`);
   const ids = new Set(runs.map((run) => run.metadata.runId));
   for (const run of runs) {
     try {
@@ -97,5 +148,5 @@ export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
       issues.push(`${run.metadata.runId}: missing parent ${run.metadata.parentRunId}`);
     }
   }
-  return { runs: runs.length, issues };
+  return { runs: runs.length, directNotes: direct.notes.length, issues };
 }

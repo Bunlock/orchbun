@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -69,5 +69,36 @@ test("records linked parent and child runs without a provider call", async () =>
   assert.equal(codex.capturedEnvironment?.ORCHBUN_MODE, "work");
   assert.equal(claude.capturedEnvironment?.ORCHBUN_DEPTH, "1");
   assert.equal(await readFile(path.join(child.runDirectory, "prompt.md"), "utf8"), "Review the proposed change.");
-  assert.deepEqual(await verifyMemory(orchestrator.journal), { runs: 2, issues: [] });
+  assert.deepEqual(await verifyMemory(orchestrator.journal), { runs: 2, directNotes: 0, issues: [] });
+});
+
+test("refreshes direct memory before building managed context", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-orchestrator-"));
+  await writeFile(path.join(root, "orchbun.yaml"), "version: 1\n");
+  const directDirectory = path.join(root, "memory", "agents", "direct", "2026", "08");
+  await mkdir(directDirectory, { recursive: true });
+  await writeFile(path.join(directDirectory, "20260810T122000Z-direct-context.md"), `# Direct context
+
+- **Task:** HEX-DIRECT-2
+- **Outcome:** Direct memory is available to managed agents.
+- **Decisions:** Include direct notes in projections.
+- **Risks or blockers:** None
+- **Next actions:** None
+- **Changed files:** None
+- **Verification:** Context assertion.
+`);
+  const orchestrator = new Orchestrator(root, DEFAULT_CONFIG, { codex: new FakeAdapter("codex") });
+
+  const packet = await orchestrator.context({
+    agent: "codex",
+    mode: "review",
+    sourcePrompt: "Inspect unified memory.",
+    taskId: "HEX-3",
+    parentRunId: null,
+    depth: 0,
+    contextFiles: [],
+  });
+
+  assert.match(packet.expandedPrompt, /Direct memory is available to managed agents/);
+  assert.ok(packet.includedFiles.includes("memory/agents/working/project-state.md"));
 });

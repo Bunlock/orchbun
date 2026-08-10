@@ -2,7 +2,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
-import { buildContextPacket } from "./context.js";
+import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
 import type { AgentKind, RunMode } from "./types.js";
@@ -117,12 +117,25 @@ async function main(): Promise<void> {
       return;
     }
     if (subcommand === "runs") {
-      for (const run of (await loadRuns(orchestrator.journal)).reverse()) {
-        console.log(`${run.metadata.runId}\t${run.metadata.status}\t${run.metadata.agent}\t${run.metadata.taskId ?? "-"}\t${run.metadata.parentRunId ?? "-"}`);
+      const direct = await loadDirectMemory(orchestrator.journal.memoryRoot);
+      assertValidDirectMemory(direct);
+      const entries = [
+        ...(await loadRuns(orchestrator.journal)).map((run) => ({
+          startedAt: run.metadata.startedAt,
+          line: `${run.metadata.runId}\t${run.metadata.status}\t${run.metadata.agent}\t${run.metadata.taskId ?? "-"}\t${run.metadata.parentRunId ?? "-"}`,
+        })),
+        ...direct.notes.map((note) => ({
+          startedAt: note.timestamp,
+          line: `${note.id}\trecorded\tdirect\t${note.slug}\t-`,
+        })),
+      ].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      for (const entry of entries) {
+        console.log(entry.line);
       }
       return;
     }
     if (subcommand === "show") {
+      await rebuildMemory(orchestrator.journal);
       const working = path.join(memoryRoot(root, config), "working");
       for (const file of ["project-state.md", "active-tasks.md", "decisions.md", "risks.md"]) {
         console.log(await readFile(path.join(working, file), "utf8"));
@@ -154,13 +167,7 @@ async function main(): Promise<void> {
   };
 
   if (command === "context" || args.options.has("dry-run")) {
-    const packet = await buildContextPacket(root, config, {
-      sourcePrompt: options.sourcePrompt,
-      taskId: options.taskId,
-      mode: options.mode,
-      contextFiles: options.contextFiles,
-      allowDelegation: options.mode === "work" && options.depth < config.delegation.maxDepth,
-    });
+    const packet = await orchestrator.context(options);
     console.log(packet.expandedPrompt);
     console.error(`\n${packet.inputCharacters} chars · ~${packet.estimatedInputTokens} tokens · ${packet.includedFiles.length} context files`);
     return;

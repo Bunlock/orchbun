@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -62,9 +62,53 @@ test("journal preserves raw prompts/results and rebuilds working memory", async 
     nativeFileName: "events.jsonl",
   };
   await journal.complete(directory, metadata, response);
+  const directDirectory = path.join(root, "direct", "2026", "08");
+  await mkdir(directDirectory, { recursive: true });
+  await writeFile(path.join(directDirectory, "20260810T120200Z-document-economy-review.md"), `# Document economy review
+
+- **Task:** HEX-DIRECT-1
+- **Outcome:** Documented the follow-up economy decision.
+- **Decisions:** Keep provincial treasuries authoritative.
+- **Risks or blockers:** Backend migration is still pending.
+- **Next actions:** Seed the shared package.
+- **Changed files:** None
+- **Verification:** Reviewed the existing managed result.
+`);
+  await writeFile(path.join(directDirectory, "20260810T120300Z-finalize-economy-review.md"), `# Finalize economy review
+
+- **Task:** HEX-DIRECT-1
+- **Outcome:** Finalized the direct economy memory.
+- **Decisions:** Use the unified memory projection.
+- **Risks or blockers:** None
+- **Next actions:** None
+- **Changed files:** None
+- **Verification:** Supersession assertion.
+- **Supersedes:** 20260810T120200Z-document-economy-review
+`);
   await rebuildMemory(journal);
 
   assert.equal(await readFile(path.join(directory, "prompt.md"), "utf8"), "Exact original prompt");
-  assert.match(await readFile(path.join(root, "working", "project-state.md"), "utf8"), /Reviewed the economy/);
-  assert.deepEqual(await verifyMemory(journal), { runs: 1, issues: [] });
+  const projectState = await readFile(path.join(root, "working", "project-state.md"), "utf8");
+  assert.match(projectState, /Reviewed the economy/);
+  assert.match(projectState, /Documented the follow-up economy decision/);
+  assert.match(projectState, /Finalized the direct economy memory/);
+  const decisions = await readFile(path.join(root, "working", "decisions.md"), "utf8");
+  assert.match(decisions, /unified memory projection/);
+  assert.doesNotMatch(decisions, /provincial treasuries/);
+  assert.doesNotMatch(await readFile(path.join(root, "working", "risks.md"), "utf8"), /Backend migration/);
+  assert.deepEqual(await verifyMemory(journal), { runs: 1, directNotes: 2, issues: [] });
+});
+
+test("verify reports malformed direct memory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-memory-"));
+  const journal = new RunJournal(root);
+  await journal.initialize();
+  const directDirectory = path.join(root, "direct", "2026", "08");
+  await mkdir(directDirectory, { recursive: true });
+  await writeFile(path.join(directDirectory, "20260810T121000Z-incomplete-note.md"), "# Incomplete\n\n- **Task:** HEX-2\n");
+
+  const report = await verifyMemory(journal);
+  assert.equal(report.directNotes, 0);
+  assert.ok(report.issues.some((issue) => issue.includes("missing fields")));
+  await assert.rejects(() => rebuildMemory(journal), /Direct memory validation failed/);
 });

@@ -51,6 +51,14 @@ project/memory/agents/runs/YYYY/MM/<run-id>/
 
 Generated compact context is stored in `project/memory/agents/working/`. Raw history and `project/memory/` are never loaded automatically.
 
+Agents prompted outside Orchbun can contribute compact notes under
+`project/memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md`. Each note must contain
+the labeled fields `Task`, `Outcome`, `Decisions`, `Risks or blockers`, `Next actions`,
+`Changed files`, and `Verification`. Orchbun validates and merges these notes into working
+memory before showing memory or building managed-agent context. An optional `Supersedes`
+field can name earlier direct-note IDs whose current decisions, risks, and next actions should
+be retired while their history remains indexed.
+
 ## Maintenance
 
 ```sh
@@ -59,5 +67,9 @@ pnpm orchbun memory runs
 pnpm orchbun memory verify
 pnpm orchbun memory rebuild
 ```
+
+`memory init` creates both managed and direct-memory structures. `memory show` rebuilds and
+prints unified projections, `memory runs` lists managed runs and direct notes, `memory rebuild`
+regenerates projections from both sources, and `memory verify` validates both sources.
 
 The target workspace’s `orchbun.yaml` controls input limits, per-file limits, output limits, and delegation depth.
