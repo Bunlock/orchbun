@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orchbun.local/schemas/agent-result-v2.schema.json",
+  "title": "Orchbun agent result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "prompt_intent",
+    "outcome",
+    "summary",
+    "deliverables",
+    "files_changed",
+    "decisions",
+    "risks",
+    "blockers",
+    "open_questions",
+    "next_actions",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": { "const": "2.0" },
+    "task_id": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 80 },
+        { "type": "null" }
+      ]
+    },
+    "prompt_intent": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "outcome": { "enum": ["completed", "partial", "blocked", "failed"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "deliverables": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "value", "description"],
+        "properties": {
+          "type": { "enum": ["file", "commit", "url", "note", "other"] },
+          "value": { "type": "string", "maxLength": 500 },
+          "description": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+    "files_changed": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "change"],
+        "properties": {
+          "path": { "type": "string", "maxLength": 500 },
+          "change": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+    "decisions": { "$ref": "#/$defs/shortStrings" },
+    "risks": { "$ref": "#/$defs/shortStrings" },
+    "blockers": { "$ref": "#/$defs/shortStrings" },
+    "open_questions": { "$ref": "#/$defs/shortStrings" },
+    "next_actions": { "$ref": "#/$defs/shortStrings" },
+    "verification": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["check", "result", "evidence"],
+        "properties": {
+          "check": { "type": "string", "maxLength": 500 },
+          "result": { "enum": ["passed", "failed", "not_run"] },
+          "evidence": { "type": "string", "maxLength": 800 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "shortStrings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "maxLength": 800 }
+    }
+  }
+}
