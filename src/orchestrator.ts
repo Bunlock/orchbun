@@ -50,7 +50,7 @@ export class Orchestrator {
 
   async context(options: RunOptions): Promise<ContextPacket> {
     await this.journal.initialize();
-    await rebuildMemory(this.journal);
+    await rebuildMemory(this.journal, this.root);
     return buildContextPacket(this.root, this.config, {
       sourcePrompt: options.sourcePrompt,
       taskId: options.taskId,
@@ -141,14 +141,14 @@ export class Orchestrator {
       if (response.usage) metadata.usage = response.usage;
       if (response.model) metadata.model = response.model;
       await this.journal.complete(runDirectory, metadata, response);
-      await rebuildMemory(this.journal);
+      await rebuildMemory(this.journal, this.root);
       return { result: response.result, metadata, runDirectory };
     } catch (error) {
       metadata.status = "failed";
       metadata.finishedAt = new Date().toISOString();
       metadata.gitAfter = snapshotLabel(await gitSnapshot(this.root));
       await this.journal.fail(runDirectory, metadata, error);
-      await rebuildMemory(this.journal);
+      await rebuildMemory(this.journal, this.root);
       throw error;
     }
   }

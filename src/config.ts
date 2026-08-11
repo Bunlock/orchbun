@@ -20,6 +20,10 @@ export interface OrchbunConfig {
     maxDepth: number;
     defaultMode: RunMode;
   };
+  images: {
+    pollIntervalMs: number;
+    timeoutMs: number;
+  };
 }
 
 export const CONFIG_FILE = "orchbun.yaml";
@@ -40,6 +44,10 @@ export const DEFAULT_CONFIG: OrchbunConfig = {
   delegation: {
     maxDepth: 2,
     defaultMode: "review",
+  },
+  images: {
+    pollIntervalMs: 2_000,
+    timeoutMs: 120_000,
   },
 };
 
@@ -70,6 +78,7 @@ export async function loadConfig(root: string): Promise<OrchbunConfig> {
     budgets: { ...DEFAULT_CONFIG.budgets, ...parsed.budgets },
     agents: { ...DEFAULT_CONFIG.agents, ...parsed.agents },
     delegation: { ...DEFAULT_CONFIG.delegation, ...parsed.delegation },
+    images: { ...DEFAULT_CONFIG.images, ...parsed.images },
   };
 }
 

@@ -90,3 +90,52 @@ supersedes: []
   assert.equal(second.compacted.length, 0);
   assert.equal(second.skipped, 2);
 });
+
+test("memory sleep previews and publishes roadmap-reconciled active tasks", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-sleep-"));
+  await writeFile(path.join(root, "orchbun.yaml"), "version: 1\n");
+  await writeFile(path.join(root, "ROADMAP.md"), `# Roadmap
+
+## A — Foundation
+
+- [x] **HEX-A1** Finished work.
+
+## B — Playable
+
+- [ ] **HEX-B1** Finish mobile play.
+
+## C — Campaign
+
+- [ ] **HEX-C1** Build the campaign.
+`);
+  const direct = path.join(root, "memory", "agents", "direct", "2026", "08");
+  await mkdir(direct, { recursive: true });
+  await writeFile(path.join(direct, "20260810T160000Z-finish-mobile.md"), `# Finish mobile
+
+- **Task:** HEX-B1 mobile play
+- **Outcome:** Recorded the remaining work.
+- **Decisions:** None
+- **Risks or blockers:** None
+- **Next actions:** Complete HEX-B1 interaction coverage.
+- **Changed files:** None
+- **Verification:** Reviewed roadmap state.
+`);
+
+  const cli = path.resolve("src/cli.ts");
+  const base = ["--import", "tsx", cli, "memory", "sleep", "--root", root, "--json"];
+  const preview = JSON.parse((await execute(process.execPath, [...base, "--dry-run"])).stdout) as {
+    published: boolean;
+    snapshot: { activeTasks: Array<{ taskId: string }> };
+  };
+  assert.equal(preview.published, false);
+  assert.deepEqual(preview.snapshot.activeTasks.map((task) => task.taskId), ["HEX-B1"]);
+  await assert.rejects(readFile(path.join(root, "memory", "agents", "sleep", "state.json")));
+
+  const published = JSON.parse((await execute(process.execPath, base)).stdout) as { published: boolean; snapshotPath: string };
+  assert.equal(published.published, true);
+  assert.match(published.snapshotPath, /^sleep\/snapshots\/[a-f0-9]{64}\.json$/);
+  assert.match(
+    await readFile(path.join(root, "memory", "agents", "working", "active-tasks.md"), "utf8"),
+    /HEX-B1 · Playable.*Complete HEX-B1 interaction coverage/s,
+  );
+});

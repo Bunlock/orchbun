@@ -109,11 +109,104 @@ pnpm orchbun memory compact --all
 
 `--all` validates the complete set before publishing, processes it in review-acceptance order,
 and skips manifests whose content hash is already in the immutable archive. It remains
-manifest-gated; it does not compact raw conversations or unreviewed work.
+manifest-gated; it does not compact raw conversations or unreviewed work. The slash alias also
+accepts `pnpm orchbun /compact --all`.
 
 The command stages a complete replacement, archives the prior `working/` tree with the approved
 manifest and publication receipt, then swaps in the milestone baseline under the memory lock.
 Subsequent rebuilds retain that baseline and ingest only records created after compaction.
+
+## Deterministic memory sleep
+
+`memory sleep` reconciles generated active tasks with `ROADMAP.md` without using an AI model.
+It treats the first milestone containing an unchecked stable task ID as active, keeps later
+milestones scheduled, and removes completed-task, scheduled-task, and unlinked follow-ups from
+prompt-loaded `working/active-tasks.md`. Direct notes and managed run history remain immutable.
+
+Preview the reconciliation first:
+
+```sh
+pnpm orchbun memory sleep --dry-run
+```
+
+Publish it with:
+
+```sh
+pnpm orchbun memory sleep
+```
+
+Publication records a content-addressed audit snapshot under `memory/agents/sleep/snapshots/`
+and enables roadmap reconciliation for future memory rebuilds. Repeating Sleep with unchanged
+inputs reuses the same snapshot. This first deterministic phase does not rank or semantically
+merge decisions and risks.
+
+## Leonardo image generation over MCP
+
+Orchbun exposes a local stdio MCP server with a provider-neutral `generate_image` tool and a
+`get_image_generation` status tool.
+Leonardo is the only implemented image provider; no unofficial Midjourney automation is included.
+
+The provider uses Leonardo's official REST API so Orchbun can persist the full lifecycle. It submits
+Lucid Origin jobs through `POST /v2/generations`, then polls the documented v1 generation endpoint.
+The API key is read only from `LEONARDO_API_KEY` and is never written to memory.
+
+Build the project, then configure an MCP client to launch the local server:
+
+```json
+{
+  "mcpServers": {
+    "orchbun-images": {
+      "command": "node",
+      "args": ["/Users/bunlock/orchbun/dist/mcp.js"],
+      "env": {
+        "ORCHBUN_ROOT": "/Users/bunlock/orchbun/hexarch",
+        "LEONARDO_API_KEY": "${LEONARDO_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Example `generate_image` arguments:
+
+```json
+{
+  "provider": "leonardo",
+  "project": "hexarch",
+  "assetType": "system-view-icon",
+  "prompt": "A legible orbital command base signifier on dark space",
+  "parameters": {
+    "model": "lucid-origin",
+    "width": 1024,
+    "height": 1024,
+    "count": 4,
+    "mode": "FAST",
+    "public": false
+  },
+  "references": [
+    {
+      "id": "LEONARDO_UPLOADED_IMAGE_ID",
+      "type": "uploaded",
+      "purpose": "style",
+      "strength": "high",
+      "sourceUrl": "https://example.invalid/audit-reference.png"
+    }
+  ],
+  "parentGenerationId": null,
+  "waitForCompletion": true
+}
+```
+
+Records are stored under `memory/agents/generations/YYYY/MM/<generation-id>/record.json`.
+Each record contains the provider, project, asset type, exact prompt, parameters, references,
+request/update/completion timestamps, Leonardo generation ID and status, result URLs, errors,
+and the optional local `parentGenerationId`. `memory verify` validates these records, but they
+are intentionally excluded from compact agent prompt context.
+
+If polling times out or hits a transient status error, the record remains `processing` with its
+external generation ID and a retryable error. Call `get_image_generation` with the local
+`generationId` to refresh it. The same journal update boundary can later accept an authenticated
+Leonardo webhook without opening a public listener in this local stdio server.
 
 ## Maintenance
 
@@ -122,12 +215,15 @@ pnpm orchbun memory show
 pnpm orchbun memory runs
 pnpm orchbun memory verify
 pnpm orchbun memory rebuild
+pnpm orchbun memory sleep --dry-run        # preview deterministic task pruning
+pnpm orchbun memory sleep                  # publish and enable roadmap reconciliation
 pnpm orchbun memory compact --milestone <name> # one accepted milestone
 pnpm orchbun memory compact --all              # every unpublished accepted milestone
 ```
 
 `memory init` creates both managed and direct-memory structures. `memory show` rebuilds and
 prints unified projections, `memory runs` lists managed runs and direct notes, `memory rebuild`
-regenerates projections from both sources, and `memory verify` validates both sources.
+regenerates projections from both sources, and `memory verify` also validates image records.
 
-The target workspace’s `orchbun.yaml` controls input limits, per-file limits, output limits, and delegation depth.
+The target workspace’s `orchbun.yaml` controls input limits, per-file limits, output limits,
+delegation depth, and image polling defaults.

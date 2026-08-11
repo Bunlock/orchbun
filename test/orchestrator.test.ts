@@ -74,7 +74,9 @@ test("records linked parent and child runs without a provider call", async () =>
     { path: "ROADMAP.md", change: "Marked HEX-2 complete after the successful work run." },
   ]);
   assert.equal(await readFile(path.join(child.runDirectory, "prompt.md"), "utf8"), "Review the proposed change.");
-  assert.deepEqual(await verifyMemory(orchestrator.journal), { runs: 2, directNotes: 0, compactArchives: 0, issues: [] });
+  assert.deepEqual(await verifyMemory(orchestrator.journal), {
+    runs: 2, directNotes: 0, compactArchives: 0, imageGenerations: 0, issues: [],
+  });
 });
 
 test("refreshes direct memory before building managed context", async () => {

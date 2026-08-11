@@ -16,6 +16,7 @@ This directory is local, ignored by Git, and shared by managed agents.
 - \`result.json\` and \`summary.md\` are the normalized compact result.
 - Files under \`working/\` are generated projections. Do not edit them manually.
 - Compact direct-agent notes under \`direct/\` are validated and merged into working memory.
+- \`memory sleep\` reconciles active tasks with the first incomplete roadmap milestone.
 - \`/compact\` accepts only a reviewed milestone manifest whose decision is \`accepted\`.
 - Compaction archives the previous working context and publishes a durable milestone baseline.
 - \`design/\` and old run history are never loaded automatically.
@@ -25,7 +26,7 @@ export class RunJournal {
   constructor(readonly memoryRoot: string) {}
 
   async initialize(): Promise<void> {
-    const directories = ["runs", "working", "locks", "direct", "milestones", "archive"];
+    const directories = ["runs", "working", "locks", "direct", "milestones", "archive", "sleep"];
     await Promise.all(directories.map((directory) => mkdir(path.join(this.memoryRoot, directory), { recursive: true })));
     await this.writeIfMissing(path.join(this.memoryRoot, "README.md"), PROTOCOL);
     await this.writeIfMissing(path.join(this.memoryRoot, "direct", "README.md"), DIRECT_MEMORY_PROTOCOL);

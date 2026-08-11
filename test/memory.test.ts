@@ -97,7 +97,9 @@ test("journal preserves raw prompts/results and rebuilds working memory", async 
   assert.match(decisions, /unified memory projection/);
   assert.doesNotMatch(decisions, /provincial treasuries/);
   assert.doesNotMatch(await readFile(path.join(root, "working", "risks.md"), "utf8"), /Backend migration/);
-  assert.deepEqual(await verifyMemory(journal), { runs: 1, directNotes: 2, compactArchives: 0, issues: [] });
+  assert.deepEqual(await verifyMemory(journal), {
+    runs: 1, directNotes: 2, compactArchives: 0, imageGenerations: 0, issues: [],
+  });
 });
 
 test("verify reports malformed direct memory", async () => {
@@ -179,7 +181,9 @@ supersedes:
   assert.match(await readFile(path.join(root, "working", "project-state.md"), "utf8"), /Began planning after the accepted replay milestone/);
   assert.match(await readFile(path.join(root, "working", "decisions.md"), "utf8"), /mulberry32/);
   assert.match(await readFile(path.join(root, "working", "decisions.md"), "utf8"), /service boundary/);
-  assert.deepEqual(await verifyMemory(journal), { runs: 0, directNotes: 1, compactArchives: 1, issues: [] });
+  assert.deepEqual(await verifyMemory(journal), {
+    runs: 0, directNotes: 1, compactArchives: 1, imageGenerations: 0, issues: [],
+  });
 });
 
 test("compact rejects a milestone before acceptance without changing working memory", async () => {

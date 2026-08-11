@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
+import { ImageGenerationJournal } from "./image-generation/journal.js";
 import { metadataFromYaml, RunJournal } from "./journal.js";
 import { loadApprovedMilestoneManifest, loadCompactArchives, readCompactState, renderCompactProjectState } from "./milestone-memory.js";
 import type { AgentResult, RunMetadata } from "./types.js";
@@ -17,6 +18,7 @@ export interface VerifyReport {
   runs: number;
   directNotes: number;
   compactArchives: number;
+  imageGenerations: number;
   issues: string[];
 }
 
@@ -59,11 +61,11 @@ export async function loadRuns(journal: RunJournal): Promise<RecordedRun[]> {
   return runs.sort((a, b) => a.metadata.startedAt.localeCompare(b.metadata.startedAt));
 }
 
-export async function rebuildMemory(journal: RunJournal): Promise<void> {
-  await journal.withProjectionLock(() => rebuildMemoryUnlocked(journal));
+export async function rebuildMemory(journal: RunJournal, projectRoot?: string): Promise<void> {
+  await journal.withProjectionLock(() => rebuildMemoryUnlocked(journal, projectRoot));
 }
 
-async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
+async function rebuildMemoryUnlocked(journal: RunJournal, projectRoot?: string): Promise<void> {
   const runs = await loadRuns(journal);
   const direct = await loadDirectMemory(journal.memoryRoot);
   assertValidDirectMemory(direct);
@@ -116,6 +118,9 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
     ? `${renderCompactProjectState(compact).trim()}${stateLines.length ? `\n\n## Since compaction\n\n${stateLines.join("\n")}` : ""}\n`
     : `# Project state\n\n${stateLines.join("\n") || "No completed managed runs or direct notes."}\n`;
   const baselineTasks = compact?.baseline.pendingWork.map((item) => `- ${item}`) ?? [];
+  const reconciledTasks = projectRoot
+    ? await import("./sleep-memory.js").then(({ reconciledActiveTasks }) => reconciledActiveTasks(projectRoot, journal))
+    : undefined;
   const links = [
     ...runs.map((run) => {
       const relative = path.relative(journal.memoryRoot, run.directory).split(path.sep).join("/");
@@ -133,7 +138,10 @@ async function rebuildMemoryUnlocked(journal: RunJournal): Promise<void> {
 
   await Promise.all([
     writeFile(path.join(journal.memoryRoot, "working", "project-state.md"), projectState),
-    writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), `# Active tasks\n\n${[...baselineTasks, ...taskLines].join("\n") || "No task-linked memory records."}\n`),
+    writeFile(
+      path.join(journal.memoryRoot, "working", "active-tasks.md"),
+      reconciledTasks ?? `# Active tasks\n\n${[...baselineTasks, ...taskLines].join("\n") || "No task-linked memory records."}\n`,
+    ),
     writeFile(path.join(journal.memoryRoot, "working", "decisions.md"), `# Decisions\n\n${decisions.map((item) => `- ${item}`).join("\n") || "No decisions recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "working", "contracts.md"), `# APIs and contracts\n\n${compact?.baseline.contracts.map((item) => `- ${item}`).join("\n") || "No APIs or contracts recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "working", "risks.md"), `# Risks and blockers\n\n${risks.map((item) => `- ${item}`).join("\n") || "No risks recorded."}\n`),
@@ -145,8 +153,12 @@ export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
   const runs = await loadRuns(journal);
   const direct = await loadDirectMemory(journal.memoryRoot);
   const compact = await readCompactState(journal.memoryRoot);
+  const imageJournal = new ImageGenerationJournal(journal.memoryRoot);
+  const imageGenerations = await imageJournal.allRecords();
   let archives: Awaited<ReturnType<typeof loadCompactArchives>> = [];
   const issues: string[] = direct.issues.map((issue) => `direct: ${issue}`);
+  const sleepIssues = await import("./sleep-memory.js").then(({ verifySleep }) => verifySleep(journal.memoryRoot));
+  issues.push(...sleepIssues.map((issue) => `sleep: ${issue}`));
   try {
     archives = await loadCompactArchives(journal.memoryRoot);
   } catch (error) {
@@ -164,6 +176,25 @@ export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
     }
     if (run.metadata.parentRunId && !ids.has(run.metadata.parentRunId)) {
       issues.push(`${run.metadata.runId}: missing parent ${run.metadata.parentRunId}`);
+    }
+  }
+  const generationIds = new Set(imageGenerations.map(({ record }) => record.request.generationId));
+  for (const { directory, record } of imageGenerations) {
+    const label = `image ${path.basename(directory)}`;
+    if (record.schemaVersion !== 1) issues.push(`${label}: unsupported schema version`);
+    if (record.request.generationId !== record.result.generationId) issues.push(`${label}: request/result ID mismatch`);
+    if (record.request.provider !== record.result.provider) issues.push(`${label}: request/result provider mismatch`);
+    if (record.request.parentGenerationId && !generationIds.has(record.request.parentGenerationId)) {
+      issues.push(`${label}: missing parent ${record.request.parentGenerationId}`);
+    }
+    if (record.result.status === "completed" && !record.result.completedAt) {
+      issues.push(`${label}: completed generation has no completedAt timestamp`);
+    }
+    if (record.result.status === "completed" && !record.result.images.length) {
+      issues.push(`${label}: completed generation has no images`);
+    }
+    if (record.result.externalGenerationId === null && ["processing", "completed"].includes(record.result.status)) {
+      issues.push(`${label}: ${record.result.status} generation has no external ID`);
     }
   }
   for (const archive of archives) {
@@ -189,5 +220,11 @@ export async function verifyMemory(journal: RunJournal): Promise<VerifyReport> {
   if (compact && !archives.some((archive) => archive.relativePath === compact.archivePath)) {
     issues.push(`compact ${compact.milestone}: active baseline points to a missing archive`);
   }
-  return { runs: runs.length, directNotes: direct.notes.length, compactArchives: archives.length, issues };
+  return {
+    runs: runs.length,
+    directNotes: direct.notes.length,
+    compactArchives: archives.length,
+    imageGenerations: imageGenerations.length,
+    issues,
+  };
 }

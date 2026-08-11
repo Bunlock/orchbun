@@ -6,6 +6,7 @@ import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
 import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
+import { renderActiveTasks, sleepMemory } from "./sleep-memory.js";
 import type { AgentKind, RunMode } from "./types.js";
 
 const HELP = `orchbun — local, token-efficient agent orchestration
@@ -15,8 +16,9 @@ Usage:
   orchbun delegate --agent AGENT --prompt TEXT [--mode review|work]
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
   orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
-  orchbun /compact milestone=NAME scope=shared [--manifest PATH]
-  orchbun memory init|show|runs|rebuild|verify|compact
+  orchbun memory sleep [--dry-run] [--json]
+  orchbun /compact (milestone=NAME | --all) [scope=shared] [--manifest PATH]
+  orchbun memory init|show|runs|rebuild|verify|compact|sleep
 
 Options:
   --prompt-file PATH       Read the exact source prompt from a file
@@ -24,7 +26,7 @@ Options:
   --model MODEL            Provider model override
   --root PATH              Workspace root containing orchbun.yaml
   --json                   Print a machine-readable receipt
-  --dry-run                Show the expanded prompt without invoking an agent
+  --dry-run                Preview without publishing or invoking an agent
 
 Review mode is the default. Work mode must be explicit.
 `;
@@ -140,18 +142,31 @@ async function main(): Promise<void> {
   }
 
   if (command === "memory") {
+    if (subcommand === "sleep") {
+      const publish = !args.options.has("dry-run");
+      if (publish) await orchestrator.journal.initialize();
+      const receipt = await sleepMemory(root, orchestrator.journal, { publish });
+      if (args.options.has("json")) {
+        console.log(JSON.stringify(receipt, null, 2));
+      } else {
+        console.log(renderActiveTasks(receipt.snapshot.activeTasks).trimEnd());
+        console.log(`\n${receipt.published ? `Sleep snapshot published at ${receipt.snapshotPath}` : "Dry run; no memory files changed."}`);
+        console.log(`${receipt.snapshot.activeTasks.length} active · ${receipt.snapshot.scheduledTasks.length} scheduled · ${receipt.snapshot.excludedFollowups.length} excluded follow-up(s)`);
+      }
+      return;
+    }
     await orchestrator.journal.initialize();
     if (subcommand === "compact") {
       await runCompactCommand(args, root, orchestrator, "Usage: orchbun memory compact (--milestone <name> | --all) [--scope shared] [--manifest PATH]");
       return;
     }
     if (subcommand === "init") {
-      await rebuildMemory(orchestrator.journal);
+      await rebuildMemory(orchestrator.journal, root);
       console.log(orchestrator.journal.memoryRoot);
       return;
     }
     if (subcommand === "rebuild") {
-      await rebuildMemory(orchestrator.journal);
+      await rebuildMemory(orchestrator.journal, root);
       console.log("Working memory rebuilt");
       return;
     }
@@ -180,14 +195,14 @@ async function main(): Promise<void> {
       return;
     }
     if (subcommand === "show") {
-      await rebuildMemory(orchestrator.journal);
+      await rebuildMemory(orchestrator.journal, root);
       const working = path.join(memoryRoot(root, config), "working");
       for (const file of ["project-state.md", "active-tasks.md", "decisions.md", "contracts.md", "risks.md"]) {
         console.log(await readFile(path.join(working, file), "utf8"));
       }
       return;
     }
-    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact");
+    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact|sleep");
   }
 
   const isDelegate = command === "delegate";

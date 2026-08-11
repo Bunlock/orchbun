@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "orchbun": "dist/cli.js"
+    "orchbun": "dist/cli.js",
+    "orchbun-mcp": "dist/mcp.js"
   },
   "files": [
     "dist",
@@ -14,6 +15,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
+    "mcp": "node dist/mcp.js",
     "test": "node --test --import tsx test/**/*.test.ts",
     "check": "tsc -p tsconfig.json --noEmit && node --test --import tsx test/**/*.test.ts"
   },
@@ -21,8 +23,10 @@
     "node": ">=22.5"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
     "ajv": "^8.17.1",
-    "yaml": "^2.8.1"
+    "yaml": "^2.8.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
