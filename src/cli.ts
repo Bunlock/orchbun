@@ -4,6 +4,7 @@ import path from "node:path";
 import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
 import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
+import { createMemoryServer } from "./memory-web.js";
 import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
 import { renderActiveTasks, sleepMemory } from "./sleep-memory.js";
@@ -18,7 +19,7 @@ Usage:
   orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
   orchbun memory sleep [--dry-run] [--json]
   orchbun /compact (milestone=NAME | --all) [scope=shared] [--manifest PATH]
-  orchbun memory init|show|runs|rebuild|verify|compact|sleep
+  orchbun memory init|show|runs|rebuild|verify|compact|sleep|web [--port PORT]
 
 Options:
   --prompt-file PATH       Read the exact source prompt from a file
@@ -93,6 +94,13 @@ function mode(args: ParsedArgs, fallback: RunMode): RunMode {
 
 function contextFiles(args: ParsedArgs): string[] {
   return option(args, "context")?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
+}
+
+function port(args: ParsedArgs): number {
+  const value = option(args, "port") ?? "4312";
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) throw new Error("--port must be a number between 1 and 65535");
+  return parsed;
 }
 
 async function runCompactCommand(
@@ -176,6 +184,20 @@ async function main(): Promise<void> {
       if (report.issues.length) process.exitCode = 1;
       return;
     }
+    if (subcommand === "web") {
+      await rebuildMemory(orchestrator.journal, root);
+      const viewer = createMemoryServer(orchestrator.journal.memoryRoot);
+      const selectedPort = port(args);
+      await new Promise<void>((resolve, reject) => {
+        viewer.once("error", reject);
+        viewer.listen(selectedPort, "127.0.0.1", () => {
+          viewer.off("error", reject);
+          resolve();
+        });
+      });
+      console.log(`Memory viewer available at http://127.0.0.1:${selectedPort}`);
+      return;
+    }
     if (subcommand === "runs") {
       const direct = await loadDirectMemory(orchestrator.journal.memoryRoot);
       assertValidDirectMemory(direct);
@@ -202,7 +224,7 @@ async function main(): Promise<void> {
       }
       return;
     }
-    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact|sleep");
+    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact|sleep|web");
   }
 
   const isDelegate = command === "delegate";

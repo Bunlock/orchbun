@@ -219,11 +219,15 @@ pnpm orchbun memory sleep --dry-run        # preview deterministic task pruning
 pnpm orchbun memory sleep                  # publish and enable roadmap reconciliation
 pnpm orchbun memory compact --milestone <name> # one accepted milestone
 pnpm orchbun memory compact --all              # every unpublished accepted milestone
+pnpm orchbun memory web                         # local viewer at http://127.0.0.1:4312
 ```
 
 `memory init` creates both managed and direct-memory structures. `memory show` rebuilds and
 prints unified projections, `memory runs` lists managed runs and direct notes, `memory rebuild`
 regenerates projections from both sources, and `memory verify` also validates image records.
+`memory web` rebuilds and opens a local-only, read-only web view of the five generated working
+memory pages. It never serves raw prompts, run events, or direct-note source files. Use
+`--port 4313` to choose another local port.
 
 The target workspace’s `orchbun.yaml` controls input limits, per-file limits, output limits,
 delegation depth, and image polling defaults.
