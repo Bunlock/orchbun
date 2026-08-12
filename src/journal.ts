@@ -26,7 +26,7 @@ export class RunJournal {
   constructor(readonly memoryRoot: string) {}
 
   async initialize(): Promise<void> {
-    const directories = ["runs", "working", "locks", "direct", "milestones", "archive", "sleep"];
+    const directories = ["runs", "working", "locks", "direct", "milestones", "archive", "archive/direct", "archive/runs", "archive/sweeps", "sleep"];
     await Promise.all(directories.map((directory) => mkdir(path.join(this.memoryRoot, directory), { recursive: true })));
     await this.writeIfMissing(path.join(this.memoryRoot, "README.md"), PROTOCOL);
     await this.writeIfMissing(path.join(this.memoryRoot, "direct", "README.md"), DIRECT_MEMORY_PROTOCOL);
@@ -164,6 +164,7 @@ function toSnakeCaseMetadata(metadata: RunMetadata): Record<string, unknown> {
     ...(metadata.model ? { model: metadata.model } : {}),
     started_at: metadata.startedAt,
     finished_at: metadata.finishedAt,
+    completed_at: metadata.finishedAt,
     prompt_hash: metadata.promptHash,
     input_characters: metadata.inputCharacters,
     estimated_input_tokens: metadata.estimatedInputTokens,
@@ -192,7 +193,7 @@ export function metadataFromYaml(value: Record<string, unknown>): RunMetadata {
     status: value.status as RunMetadata["status"],
     ...(value.model ? { model: String(value.model) } : {}),
     startedAt: String(value.started_at),
-    finishedAt: value.finished_at ? String(value.finished_at) : null,
+    finishedAt: value.completed_at ? String(value.completed_at) : value.finished_at ? String(value.finished_at) : null,
     promptHash: String(value.prompt_hash),
     inputCharacters: Number(value.input_characters ?? 0),
     estimatedInputTokens: Number(value.estimated_input_tokens ?? 0),

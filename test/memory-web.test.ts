@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadMemorySnapshot, memoryViewerHtml, renderMemoryMarkdown } from "../src/memory-web.js";
+import { RunJournal } from "../src/journal.js";
+import { loadMemorySnapshot, memoryViewerHtml, renderMemoryMarkdown, runMemoryAction } from "../src/memory-web.js";
 
 test("memory web loads only generated working-memory pages", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-memory-web-"));
@@ -23,10 +24,21 @@ test("memory web escapes memory text before rendering", () => {
   assert.match(html, /<code>content<\/code>/);
 });
 
-test("memory web page contains accessible sections and refresh controls", () => {
+test("memory web page contains accessible sections and maintenance controls", () => {
   const page = memoryViewerHtml();
   assert.match(page, /Project memory/);
   assert.match(page, /aria-live="polite"/);
   assert.match(page, /Refresh/);
+  assert.match(page, /Preview sleep/);
+  assert.match(page, /Publish sweep/);
+  assert.match(page, /Compact accepted/);
   assert.match(page, /\/api\/memory/);
+});
+
+test("memory web runs the same verification action as the CLI", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-memory-web-action-"));
+  const memoryRoot = path.join(root, "memory", "agents");
+  const journal = new RunJournal(memoryRoot);
+  await journal.initialize();
+  assert.match(await runMemoryAction("verify", journal, root), /Verification passed/);
 });

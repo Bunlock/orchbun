@@ -58,7 +58,9 @@ Generated compact context is stored in `project/memory/agents/working/`. Raw his
 Agents prompted outside Orchbun can contribute compact notes under
 `project/memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md`. Each note must contain
 the labeled fields `Task`, `Outcome`, `Decisions`, `Risks or blockers`, `Next actions`,
-`Changed files`, and `Verification`. Orchbun validates and merges these notes into working
+`Changed files`, and `Verification`. New notes also carry `Agent`, `Recorded at` (matching the
+filename), and `Status` (`active`, `retired`, or `superseded`; retired notes include a `Reason`).
+Orchbun validates and merges active notes into working
 memory before showing memory or building managed-agent context. An optional `Supersedes`
 field can name earlier direct-note IDs whose current decisions, risks, and next actions should
 be retired while their history remains indexed.
@@ -217,6 +219,8 @@ pnpm orchbun memory verify
 pnpm orchbun memory rebuild
 pnpm orchbun memory sleep --dry-run        # preview deterministic task pruning
 pnpm orchbun memory sleep                  # publish and enable roadmap reconciliation
+pnpm orchbun memory sweep --dry-run        # preview lifecycle/archive changes
+pnpm orchbun memory sweep                  # snapshot, archive explicit stale records, rebuild, verify
 pnpm orchbun memory compact --milestone <name> # one accepted milestone
 pnpm orchbun memory compact --all              # every unpublished accepted milestone
 pnpm orchbun memory web                         # local viewer at http://127.0.0.1:4312
@@ -225,8 +229,10 @@ pnpm orchbun memory web                         # local viewer at http://127.0.0
 `memory init` creates both managed and direct-memory structures. `memory show` rebuilds and
 prints unified projections, `memory runs` lists managed runs and direct notes, `memory rebuild`
 regenerates projections from both sources, and `memory verify` also validates image records.
-`memory web` rebuilds and opens a local-only, read-only web view of the five generated working
-memory pages. It never serves raw prompts, run events, or direct-note source files. Use
+`memory web` rebuilds and opens a local-only web view of the five generated working
+memory pages. Its maintenance controls run the same rebuild, verify, Sleep, sweep, and
+accepted-milestone compaction operations as the CLI; publishing controls require a browser
+confirmation. It never serves raw prompts, run events, or direct-note source files. Use
 `--port 4313` to choose another local port.
 
 The target workspace’s `orchbun.yaml` controls input limits, per-file limits, output limits,

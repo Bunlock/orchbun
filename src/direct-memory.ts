@@ -7,7 +7,8 @@ This directory stores compact memory notes from agents prompted outside Orchbun.
 
 - Create one immutable Markdown note per task under \`YYYY/MM/\`.
 - Name notes \`<UTC timestamp>-<task-slug>.md\`, for example \`20260810T143000Z-review-auth-flow.md\`.
-- Record the task, outcome, decisions, risks or blockers, next actions, changed files, and verification.
+- Record \`Agent\`, \`Recorded at\`, task, outcome, decisions, risks or blockers, next actions, changed files, verification, and \`Status\`.
+- \`Recorded at\` must match the UTC timestamp in the filename. \`Status\` is \`active\` unless explicitly set to \`retired\` or \`superseded\`; retired notes also need a \`Reason\`.
 - Optionally add \`Supersedes\` with one or more earlier note IDs to retire their current decisions, risks, and next actions without deleting history.
 - Keep notes factual and compact. Do not place raw transcripts or secrets here.
 - Orchbun validates these notes and merges them into generated working memory.
@@ -26,6 +27,10 @@ export interface DirectMemoryNote {
   changedFiles: string[];
   verification: string[];
   supersedes: string[];
+  agent?: string;
+  recordedAt?: string;
+  status: "active" | "retired" | "superseded";
+  reason?: string;
 }
 
 export interface DirectMemoryLoadResult {
@@ -33,9 +38,11 @@ export interface DirectMemoryLoadResult {
   issues: string[];
 }
 
-type FieldName = "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "supersedes";
+type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes";
 
 const FIELD_NAMES: Record<string, FieldName> = {
+  agent: "agent",
+  "recorded at": "recordedAt",
   task: "task",
   outcome: "outcome",
   decisions: "decisions",
@@ -43,6 +50,8 @@ const FIELD_NAMES: Record<string, FieldName> = {
   "next actions": "nextActions",
   "changed files": "changedFiles",
   verification: "verification",
+  status: "status",
+  reason: "reason",
   supersedes: "supersedes",
 };
 const REQUIRED_LABELS = ["task", "outcome", "decisions", "risks or blockers", "next actions", "changed files", "verification"];
@@ -78,6 +87,19 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
     if (!parsed.values.outcome[0]?.trim()) issues.push(`${relativePath}: Outcome must not be empty`);
     if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim()) continue;
 
+    const hasLifecycleFields = ["agent", "recorded at", "status", "reason"].some((label) => parsed.present.has(label));
+    const agent = parsed.values.agent[0]?.trim();
+    const recordedAt = parsed.values.recordedAt[0]?.trim();
+    const rawStatus = parsed.values.status[0]?.trim().toLowerCase();
+    const status = rawStatus || "active";
+    if (hasLifecycleFields && !agent) issues.push(`${relativePath}: Agent must not be empty when lifecycle fields are used`);
+    if (hasLifecycleFields && !recordedAt) issues.push(`${relativePath}: Recorded at is required when lifecycle fields are used`);
+    if (recordedAt && recordedAt !== timestamp) issues.push(`${relativePath}: Recorded at must match filename timestamp ${timestamp}`);
+    if (!["active", "retired", "superseded"].includes(status)) issues.push(`${relativePath}: Status must be active, retired, or superseded`);
+    const reason = parsed.values.reason[0]?.trim();
+    if (status === "retired" && !reason) issues.push(`${relativePath}: Reason is required when Status is retired`);
+    if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim() || (hasLifecycleFields && (!agent || !recordedAt)) || (recordedAt && recordedAt !== timestamp) || !["active", "retired", "superseded"].includes(status) || (status === "retired" && !reason)) continue;
+
     notes.push({
       id: fileName.slice(0, -3),
       slug: match[2]!,
@@ -91,6 +113,10 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
       changedFiles: meaningful(parsed.values.changedFiles),
       verification: meaningful(parsed.values.verification),
       supersedes: meaningful(parsed.values.supersedes),
+      ...(agent ? { agent } : {}),
+      ...(recordedAt ? { recordedAt } : {}),
+      status: status as DirectMemoryNote["status"],
+      ...(reason ? { reason } : {}),
     });
   }
 
@@ -133,7 +159,7 @@ async function markdownFiles(root: string): Promise<string[]> {
 
 function parseFields(text: string): { values: Record<FieldName, string[]>; present: Set<string> } {
   const values: Record<FieldName, string[]> = {
-    task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], supersedes: [],
+    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [],
   };
   const present = new Set<string>();
   let current: FieldName | undefined;

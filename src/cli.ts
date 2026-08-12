@@ -6,6 +6,7 @@ import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
 import { createMemoryServer } from "./memory-web.js";
 import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
+import { sweepMemory } from "./memory-sweep.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
 import { renderActiveTasks, sleepMemory } from "./sleep-memory.js";
 import type { AgentKind, RunMode } from "./types.js";
@@ -18,8 +19,9 @@ Usage:
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
   orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
   orchbun memory sleep [--dry-run] [--json]
+  orchbun memory sweep [--dry-run] [--json]
   orchbun /compact (milestone=NAME | --all) [scope=shared] [--manifest PATH]
-  orchbun memory init|show|runs|rebuild|verify|compact|sleep|web [--port PORT]
+  orchbun memory init|show|runs|rebuild|verify|compact|sleep|sweep|web [--port PORT]
 
 Options:
   --prompt-file PATH       Read the exact source prompt from a file
@@ -163,6 +165,15 @@ async function main(): Promise<void> {
       }
       return;
     }
+    if (subcommand === "sweep") {
+      const receipt = await sweepMemory(orchestrator.journal, {
+        dryRun: args.options.has("dry-run"),
+        projectRoot: root,
+      });
+      console.log(args.options.has("json") ? JSON.stringify(receipt, null, 2) : receipt.report.trimEnd());
+      if (!receipt.verification.passed) process.exitCode = 1;
+      return;
+    }
     await orchestrator.journal.initialize();
     if (subcommand === "compact") {
       await runCompactCommand(args, root, orchestrator, "Usage: orchbun memory compact (--milestone <name> | --all) [--scope shared] [--manifest PATH]");
@@ -186,7 +197,7 @@ async function main(): Promise<void> {
     }
     if (subcommand === "web") {
       await rebuildMemory(orchestrator.journal, root);
-      const viewer = createMemoryServer(orchestrator.journal.memoryRoot);
+      const viewer = createMemoryServer(orchestrator.journal.memoryRoot, { projectRoot: root });
       const selectedPort = port(args);
       await new Promise<void>((resolve, reject) => {
         viewer.once("error", reject);
@@ -224,7 +235,7 @@ async function main(): Promise<void> {
       }
       return;
     }
-    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact|sleep|web");
+    throw new Error("Usage: orchbun memory init|show|runs|rebuild|verify|compact|sleep|sweep|web");
   }
 
   const isDelegate = command === "delegate";
