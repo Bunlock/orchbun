@@ -1,0 +1,16 @@
+version: 1
+memoryDir: memory/agents
+budgets:
+  maxInputChars: 12000
+  maxFileChars: 3500
+  maxOutputTokens: 1200
+  recentRuns: 6
+agents:
+  default: codex
+  openrouterModel: anthropic/claude-sonnet-4.5
+delegation:
+  maxDepth: 2
+  defaultMode: review
+images:
+  pollIntervalMs: 2000
+  timeoutMs: 120000

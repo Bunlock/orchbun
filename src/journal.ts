@@ -26,7 +26,7 @@ export class RunJournal {
   constructor(readonly memoryRoot: string) {}
 
   async initialize(): Promise<void> {
-    const directories = ["runs", "working", "locks", "direct", "milestones", "archive", "archive/direct", "archive/runs", "archive/sweeps", "sleep"];
+    const directories = ["runs", "working", "manual", "locks", "direct", "milestones", "archive", "archive/direct", "archive/runs", "archive/sweeps", "sleep"];
     await Promise.all(directories.map((directory) => mkdir(path.join(this.memoryRoot, directory), { recursive: true })));
     await this.writeIfMissing(path.join(this.memoryRoot, "README.md"), PROTOCOL);
     await this.writeIfMissing(path.join(this.memoryRoot, "direct", "README.md"), DIRECT_MEMORY_PROTOCOL);

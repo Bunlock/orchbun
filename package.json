@@ -1,8 +1,7 @@
 {
   "name": "orchbun",
-  "version": "0.2.0",
-  "description": "Token-efficient orchestration for Codex, Claude Code, and OpenRouter agents",
-  "private": true,
+  "version": "1.0.0",
+  "description": "Local-first agent orchestration and auditable project memory for solo developers",
   "type": "module",
   "bin": {
     "orchbun": "dist/cli.js",
@@ -10,14 +9,19 @@
   },
   "files": [
     "dist",
-    "schemas"
+    "schemas",
+    "README.md",
+    "LICENSE",
+    "FAVICON.png",
+    "ORCHBUN-logo.png"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "mcp": "node dist/mcp.js",
     "test": "node --test --import tsx test/**/*.test.ts",
-    "check": "tsc -p tsconfig.json --noEmit && node --test --import tsx test/**/*.test.ts"
+    "check": "tsc -p tsconfig.json --noEmit && node --test --import tsx test/**/*.test.ts",
+    "prepack": "npm run check && npm run build"
   },
   "engines": {
     "node": ">=22.5"
@@ -33,5 +37,23 @@
     "tsx": "^4.20.4",
     "typescript": "^5.9.2"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bunlock/orchbun.git"
+  },
+  "homepage": "https://github.com/Bunlock/orchbun#readme",
+  "bugs": {
+    "url": "https://github.com/Bunlock/orchbun/issues"
+  },
+  "keywords": [
+    "agents",
+    "ai-agents",
+    "cli",
+    "developer-tools",
+    "local-first",
+    "memory",
+    "orchestration"
+  ],
+  "author": "Bunlock",
   "license": "MIT"
 }

@@ -7,6 +7,7 @@ import { metadataFromYaml, RunJournal } from "./journal.js";
 import { loadApprovedMilestoneManifest, loadCompactArchives, readCompactState, renderCompactProjectState } from "./milestone-memory.js";
 import type { AgentResult, RunMetadata } from "./types.js";
 import { contentHash } from "./utils.js";
+import { applyMemoryOverrides } from "./memory-overrides.js";
 
 interface RecordedRun {
   directory: string;
@@ -151,6 +152,7 @@ export async function rebuildMemoryUnlocked(journal: RunJournal, projectRoot?: s
     writeFile(path.join(journal.memoryRoot, "working", "risks.md"), `${provenance}# Risks and blockers\n\n${risks.map((item) => `- ${item}`).join("\n") || "No risks recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "index.md"), `# Agent runs\n\n${links.join("\n") || "No runs recorded."}\n`),
   ]);
+  await applyMemoryOverrides(journal.memoryRoot);
 }
 
 async function latestSweepTimestamp(root: string): Promise<string | undefined> {

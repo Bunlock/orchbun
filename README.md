@@ -1,167 +1,186 @@
-# Orchbun
+<p align="center"><img src="ORCHBUN-logo.png" alt="OrchBun — open source AI agent memory" width="760"></p>
 
-Orchbun is a local TypeScript CLI that orchestrates Codex, Claude Code, and OpenRouter while keeping a compact, auditable project memory.
+# OrchBun
 
-Its code lives in `/Users/bunlock/orchbun`.
+OrchBun is a local-first agent manager for solo developers. It runs Codex, Claude Code, and OpenRouter agents with bounded context, records auditable results, maintains compact project memory, and provides a small local web workspace for day-to-day memory and roadmap work.
 
-## Install and verify
+The memory server binds to `127.0.0.1`. Project memory stays in the project, is ignored by Git by default, and is never uploaded by OrchBun itself.
+
+## What 1.0 includes
+
+- Review-first agent runs with explicit work mode and bounded delegation.
+- Immutable run journals plus compact direct-agent notes.
+- Five persistent memory pages: project state, tasks, decisions, APIs/contracts, and risks/blockers.
+- Markdown preview, syntax-colored raw view, and textarea editing in the local web workspace.
+- A roadmap-backed Tasks page with Active, Blocked, and Done views.
+- Severity and business-urgency selectors for tasks and risks, deriving P1–P5 action levels.
+- Project-relative editors for the versioned roadmap and master `AGENTS.md`.
+- Checklist-gated milestone approval and manifest-gated memory compaction.
+- Deterministic Sleep and sweep maintenance—no model call required.
+- A provider-neutral image-generation MCP surface with an optional Leonardo adapter.
+
+## Requirements
+
+- Node.js 22.5 or newer
+- One or more provider CLIs/credentials for the agents you choose to run
+
+## Install
+
+From npm after publication:
 
 ```sh
-cd /Users/bunlock/orchbun
+npm install --global orchbun
+```
+
+From a source checkout:
+
+```sh
 npm install
 npm run check
 npm run build
 npm link
 ```
 
-This exposes the `orchbun` command. The project repository also provides `pnpm orchbun`, which builds and runs the sibling tool without requiring a global link.
+## Initialize a project
 
-## Use with project
-
-```sh
-cd /orchbun/project
-pnpm orchbun memory init
-pnpm orchbun context --prompt "Review the XX" --task ABC-1
-pnpm orchbun run --agent codex --prompt "Review XX" --task ABC-1
-pnpm orchbun run --agent codex --mode work --prompt "Implement ABC-1" --task ABC-1
-```
-
-Inside a managed work-mode agent run:
+Run this once at the project root:
 
 ```sh
-pnpm orchbun delegate --agent claude --prompt "Review the current changes"
+orchbun init
 ```
 
-Delegates default to `review`; editing requires `--mode work`. A review-mode parent cannot delegate because its process is read-only.
+Initialization is non-destructive. Existing files are preserved; missing `orchbun.yaml`, `ROADMAP.md`, `AGENTS.md`, and the `memory/` ignore rule are created. Local memory is initialized under `memory/agents/`.
 
-When a work-mode run with a task id finishes with `outcome: completed`, Orchbun atomically marks
-the matching `- [ ] **TASK-ID**` entry in `ROADMAP.md` as complete. Review runs never change the
-roadmap, and task ids not present in the roadmap are ignored.
+Then open Memory 1.0:
 
-## Recorded architecture
+```sh
+orchbun memory web
+```
 
-Every managed run writes into the target workspace, not the Orchbun source directory:
+Visit [http://127.0.0.1:4312](http://127.0.0.1:4312). Use `--port 4313` for another port.
+
+The header derives the project name from its package metadata or directory and displays:
 
 ```text
-project/memory/agents/runs/YYYY/MM/<run-id>/
-  metadata.yaml
-  prompt.md
-  prompt.expanded.md
-  context.json
-  events.jsonl or response.native.json
-  result.json
-  summary.md
+<project name> | OrchBun memory 1.0
 ```
 
-Generated compact context is stored in `project/memory/agents/working/`. Raw history and `project/memory/` are never loaded automatically.
+### Editing and project files
 
-Agents prompted outside Orchbun can contribute compact notes under
-`project/memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md`. Each note must contain
-the labeled fields `Task`, `Outcome`, `Decisions`, `Risks or blockers`, `Next actions`,
-`Changed files`, and `Verification`. New notes also carry `Agent`, `Recorded at` (matching the
-filename), and `Status` (`active`, `retired`, or `superseded`; retired notes include a `Reason`).
-Orchbun validates and merges active notes into working
-memory before showing memory or building managed-agent context. An optional `Supersedes`
-field can name earlier direct-note IDs whose current decisions, risks, and next actions should
-be retired while their history remains indexed.
+Each memory page supports Preview, Raw, Edit, and Save. Saved memory pages become persistent local overrides under `memory/agents/manual/`; rebuild and compaction reapply them instead of silently discarding edits.
+
+The Project files page opens and edits project-relative Markdown paths. `ROADMAP.md` and `AGENTS.md` are the defaults. Absolute paths, non-Markdown files, and paths outside the project are rejected.
+
+Roadmap checkboxes are validation gates. A milestone can be approved only when all of its steps are checked and `memory verify` passes. Approval creates a schema-valid local manifest under `memory/agents/milestones/<milestone>/approved.yaml`; compaction remains a separate, explicit publish action.
+
+### Severity, urgency, and priority
+
+Tasks and risks use two independent inputs:
+
+| Severity (technical impact) | High urgency | Medium urgency | Low urgency |
+|---|---:|---:|---:|
+| Critical — system/core flow down | P1 | P2 | P3 |
+| Major — core function broken | P2 | P3 | P4 |
+| Minor — cosmetic or typo | P3 | P4 | P5 |
+
+- P1: immediate, all hands; workaround or fix within hours.
+- P2: urgent; address within the same business day.
+- P3: standard weekly sprint work.
+- P4: target the next scheduled release.
+- P5: retain in the backlog until capacity permits.
+
+## CLI reference
+
+OrchBun rejects unknown options and options that do not apply to the selected command.
+
+| Command | Purpose | Relevant options |
+|---|---|---|
+| `orchbun init` | Initialize config, versioned master files, and ignored local memory | `--root`, `--json` |
+| `orchbun context` | Print the exact bounded context without invoking an agent | run options, `--json` |
+| `orchbun run` | Run an agent; review mode is the default | `--agent`, `--prompt`/`--prompt-file`, `--task`, `--mode`, `--context`, `--model`, `--dry-run`, `--json`, `--root` |
+| `orchbun delegate` | Run a bounded child from a managed work-mode parent | run options |
+| `orchbun memory show` | Rebuild and print the five working pages | `--root` |
+| `orchbun memory runs` | List managed runs and direct notes | `--root` |
+| `orchbun memory rebuild` | Regenerate projections and reapply local overrides | `--root` |
+| `orchbun memory verify` | Validate runs, direct notes, manifests, archives, and image records | `--root` |
+| `orchbun memory sleep` | Preview or publish deterministic roadmap reconciliation | `--dry-run`, `--json`, `--root` |
+| `orchbun memory sweep` | Preview or publish lifecycle-aware archival and verification | `--dry-run`, `--json`, `--root` |
+| `orchbun memory compact` | Publish one accepted manifest or all unpublished accepted manifests | `--milestone`/`--all`, `--manifest`, `--scope shared`, `--json`, `--root` |
+| `orchbun memory web` | Start the local Memory 1.0 workspace | `--port`, `--root` |
+
+Examples:
+
+```sh
+orchbun context --prompt "Review authentication boundaries" --task APP-A1
+orchbun run --agent codex --prompt "Review APP-A1" --task APP-A1
+orchbun run --agent codex --mode work --prompt "Implement APP-A1" --task APP-A1
+orchbun memory sleep --dry-run
+orchbun memory sweep --dry-run
+orchbun memory compact --milestone a
+orchbun memory compact --all
+```
+
+`--prompt-file` and `--context` paths must stay inside the project. Review mode is read-only. Work mode must be explicit. Delegation is accepted only inside a managed work-mode run and is bounded by `orchbun.yaml`.
+
+## Memory layout
+
+```text
+project/
+  AGENTS.md                 versioned agent contract
+  ROADMAP.md                versioned milestone checklist
+  orchbun.yaml              versioned OrchBun configuration
+  memory/                   local and ignored
+    agents/
+      direct/               immutable compact notes
+      manual/               persistent web edits and qualifications
+      milestones/           accepted manifests
+      runs/                 immutable managed-run journals
+      working/              generated projections
+      archive/              compaction and sweep snapshots
+      sleep/                deterministic reconciliation snapshots
+```
+
+Raw prompts and native provider responses are retained for audit but never loaded automatically into future prompts. `memory/design/` is also opt-in context only.
+
+Direct notes use `memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md` and record Agent, Recorded at, Task, Outcome, Decisions, Risks or blockers, Next actions, Changed files, Verification, and Status. `Supersedes` can retire obsolete state without deleting history.
 
 ## Accepted milestone compaction
 
-Compaction is a post-review gate. Review writes
-`memory/agents/milestones/<name>/approved.yaml`; `/compact` refuses any manifest whose review
-decision is not `accepted`, and it never summarizes raw provider conversation. The manifest
-records the accepted summary, validated outcomes, durable decisions, APIs/contracts, risks,
-pending work, artifact references, and any exact prior memory items superseded by the milestone.
+Compaction consumes only schema-valid manifests whose review decision is `accepted`. It never summarizes a raw conversation. A manifest records validated outcomes, durable decisions, contracts, risks, pending work, artifacts, and exact superseded items.
 
 ```yaml
 schema_version: "1.0"
-milestone: hex-a3
+milestone: a
 scope: shared
 review:
   decision: accepted
-  accepted_at: 2026-08-10T14:00:00Z
-  accepted_by: gameplay-review
-summary: Deterministic replay is accepted.
-validated_outcomes: [Golden replay vector passes.]
-decisions: [Use mulberry32 for replay seeds.]
-contracts: [Replay consumes the append-only action log.]
-risks: [Old saves need a version adapter.]
-pending_work: [Plan persistence integration.]
+  accepted_at: 2026-08-12T12:00:00Z
+  accepted_by: project-review
+summary: Foundation is accepted.
+validated_outcomes: [The acceptance suite passes.]
+decisions: [Keep memory local-first.]
+contracts: [The web server binds to 127.0.0.1.]
+risks: []
+pending_work: [Plan the next milestone.]
 artifacts:
-  - path: packages/sim-battle/src/seeded-random.ts
-    description: Canonical PRNG implementation.
+  - path: ROADMAP.md
+    description: Validated project roadmap.
 supersedes: []
 ```
 
-Publish it with:
+Compaction archives the prior working tree with its manifest and publication receipt, publishes the accepted baseline atomically, and reapplies intentional manual overrides.
 
-```sh
-pnpm orchbun memory compact --milestone hex-a3
-```
+## Provider-neutral image generation
 
-Use `--scope shared` explicitly if desired; shared is the default. Pass
-`--manifest path/to/approved.yaml` to consume a reviewed manifest outside the default milestone
-directory. The slash-style `pnpm orchbun /compact milestone=hex-a3 scope=shared` remains an alias.
-
-To compact every accepted manifest that has not already been archived:
-
-```sh
-pnpm orchbun memory compact --all
-```
-
-`--all` validates the complete set before publishing, processes it in review-acceptance order,
-and skips manifests whose content hash is already in the immutable archive. It remains
-manifest-gated; it does not compact raw conversations or unreviewed work. The slash alias also
-accepts `pnpm orchbun /compact --all`.
-
-The command stages a complete replacement, archives the prior `working/` tree with the approved
-manifest and publication receipt, then swaps in the milestone baseline under the memory lock.
-Subsequent rebuilds retain that baseline and ingest only records created after compaction.
-
-## Deterministic memory sleep
-
-`memory sleep` reconciles generated active tasks with `ROADMAP.md` without using an AI model.
-It treats the first milestone containing an unchecked stable task ID as active, keeps later
-milestones scheduled, and removes completed-task, scheduled-task, and unlinked follow-ups from
-prompt-loaded `working/active-tasks.md`. Direct notes and managed run history remain immutable.
-
-Preview the reconciliation first:
-
-```sh
-pnpm orchbun memory sleep --dry-run
-```
-
-Publish it with:
-
-```sh
-pnpm orchbun memory sleep
-```
-
-Publication records a content-addressed audit snapshot under `memory/agents/sleep/snapshots/`
-and enables roadmap reconciliation for future memory rebuilds. Repeating Sleep with unchanged
-inputs reuses the same snapshot. This first deterministic phase does not rank or semantically
-merge decisions and risks.
-
-## Leonardo image generation over MCP
-
-Orchbun exposes a local stdio MCP server with a provider-neutral `generate_image` tool and a
-`get_image_generation` status tool.
-Leonardo is the only implemented image provider; no unofficial Midjourney automation is included.
-
-The provider uses Leonardo's official REST API so Orchbun can persist the full lifecycle. It submits
-Lucid Origin jobs through `POST /v2/generations`, then polls the documented v1 generation endpoint.
-The API key is read only from `LEONARDO_API_KEY` and is never written to memory.
-
-Build the project, then configure an MCP client to launch the local server:
+The `orchbun-mcp` executable exposes `generate_image` and `get_image_generation`. Leonardo is the currently implemented adapter. `LEONARDO_API_KEY` is read only from the environment and is never written to memory.
 
 ```json
 {
   "mcpServers": {
     "orchbun-images": {
-      "command": "node",
-      "args": ["/Users/bunlock/orchbun/dist/mcp.js"],
+      "command": "orchbun-mcp",
       "env": {
-        "ORCHBUN_ROOT": "/Users/bunlock/orchbun/hexarch",
+        "ORCHBUN_ROOT": "/absolute/path/to/project",
         "LEONARDO_API_KEY": "${LEONARDO_API_KEY}"
       }
     }
@@ -169,71 +188,12 @@ Build the project, then configure an MCP client to launch the local server:
 }
 ```
 
-Example `generate_image` arguments:
+Generation records are local, auditable, and excluded from prompt-loaded memory. A fake adapter can be used in tests without consuming provider credits.
 
-```json
-{
-  "provider": "leonardo",
-  "project": "hexarch",
-  "assetType": "system-view-icon",
-  "prompt": "A legible orbital command base signifier on dark space",
-  "parameters": {
-    "model": "lucid-origin",
-    "width": 1024,
-    "height": 1024,
-    "count": 4,
-    "mode": "FAST",
-    "public": false
-  },
-  "references": [
-    {
-      "id": "LEONARDO_UPLOADED_IMAGE_ID",
-      "type": "uploaded",
-      "purpose": "style",
-      "strength": "high",
-      "sourceUrl": "https://example.invalid/audit-reference.png"
-    }
-  ],
-  "parentGenerationId": null,
-  "waitForCompletion": true
-}
-```
+## Contributing
 
-Records are stored under `memory/agents/generations/YYYY/MM/<generation-id>/record.json`.
-Each record contains the provider, project, asset type, exact prompt, parameters, references,
-request/update/completion timestamps, Leonardo generation ID and status, result URLs, errors,
-and the optional local `parentGenerationId`. `memory verify` validates these records, but they
-are intentionally excluded from compact agent prompt context.
+OrchBun is MIT licensed and open to focused pull requests from humans and from agents working with human maintainers. Agent-authored PRs are welcome: disclose substantial agent assistance, include verification, and remain accountable for the submitted change. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-If polling times out or hits a transient status error, the record remains `processing` with its
-external generation ID and a retryable error. Call `get_image_generation` with the local
-`generationId` to refresh it. The same journal update boundary can later accept an authenticated
-Leonardo webhook without opening a public listener in this local stdio server.
+## License
 
-## Maintenance
-
-```sh
-pnpm orchbun memory show
-pnpm orchbun memory runs
-pnpm orchbun memory verify
-pnpm orchbun memory rebuild
-pnpm orchbun memory sleep --dry-run        # preview deterministic task pruning
-pnpm orchbun memory sleep                  # publish and enable roadmap reconciliation
-pnpm orchbun memory sweep --dry-run        # preview lifecycle/archive changes
-pnpm orchbun memory sweep                  # snapshot, archive explicit stale records, rebuild, verify
-pnpm orchbun memory compact --milestone <name> # one accepted milestone
-pnpm orchbun memory compact --all              # every unpublished accepted milestone
-pnpm orchbun memory web                         # local viewer at http://127.0.0.1:4312
-```
-
-`memory init` creates both managed and direct-memory structures. `memory show` rebuilds and
-prints unified projections, `memory runs` lists managed runs and direct notes, `memory rebuild`
-regenerates projections from both sources, and `memory verify` also validates image records.
-`memory web` rebuilds and opens a local-only web view of the five generated working
-memory pages. Its maintenance controls run the same rebuild, verify, Sleep, sweep, and
-accepted-milestone compaction operations as the CLI; publishing controls require a browser
-confirmation. It never serves raw prompts, run events, or direct-note source files. Use
-`--port 4313` to choose another local port.
-
-The target workspace’s `orchbun.yaml` controls input limits, per-file limits, output limits,
-delegation depth, and image polling defaults.
+[MIT](LICENSE) © 2026 Bunlock.

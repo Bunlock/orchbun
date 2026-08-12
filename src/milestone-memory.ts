@@ -7,6 +7,7 @@ import type { Options, ValidateFunction } from "ajv";
 import { loadDirectMemory, assertValidDirectMemory } from "./direct-memory.js";
 import type { RunJournal } from "./journal.js";
 import { contentHash } from "./utils.js";
+import { applyMemoryOverrides } from "./memory-overrides.js";
 
 export interface MilestoneArtifact {
   path: string;
@@ -210,6 +211,7 @@ export async function compactMemory(
         await rename(path.join(archive, "working"), working);
         throw error;
       }
+      await applyMemoryOverrides(journal.memoryRoot);
     } catch (error) {
       await rm(staged, { recursive: true, force: true });
       if (!(await exists(path.join(archive, "working")))) {

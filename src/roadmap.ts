@@ -23,8 +23,8 @@ export interface RoadmapState {
 const TASK_LINE = /^\s*-\s+\[([ xX])\]\s+\*\*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\*\*\s*(.*)$/;
 const MILESTONE_LINE = /^##\s+([A-Z0-9]+)\s+[—-]\s+(.+)$/;
 
-export async function loadRoadmap(root: string): Promise<RoadmapState> {
-  const roadmapPath = path.join(root, "ROADMAP.md");
+export async function loadRoadmap(root: string, relativePath = "ROADMAP.md"): Promise<RoadmapState> {
+  const roadmapPath = projectMarkdownPath(root, relativePath);
   const raw = await readFile(roadmapPath, "utf8");
   const tasks: RoadmapTask[] = [];
   let milestone = "unscoped";
@@ -62,7 +62,7 @@ export async function loadRoadmap(root: string): Promise<RoadmapState> {
 
   const activeMilestone = tasks.find((task) => !task.completed)?.milestone ?? null;
   return {
-    path: "ROADMAP.md",
+    path: relativePath,
     hash: contentHash(raw),
     tasks,
     activeMilestone,
@@ -70,7 +70,16 @@ export async function loadRoadmap(root: string): Promise<RoadmapState> {
 }
 
 export async function completeRoadmapTask(root: string, taskId: string): Promise<RoadmapUpdate> {
-  const roadmap = path.join(root, "ROADMAP.md");
+  return setRoadmapTaskCompletion(root, taskId, true);
+}
+
+export async function setRoadmapTaskCompletion(
+  root: string,
+  taskId: string,
+  completed: boolean,
+  relativePath = "ROADMAP.md",
+): Promise<RoadmapUpdate> {
+  const roadmap = projectMarkdownPath(root, relativePath);
   let current: string;
   try {
     current = await readFile(roadmap, "utf8");
@@ -80,14 +89,28 @@ export async function completeRoadmapTask(root: string, taskId: string): Promise
   }
 
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const open = new RegExp(`^(\\s*-\\s+\\[) \\](\\s+\\*\\*${escaped}\\*\\*)`, "m");
-  const complete = new RegExp(`^\\s*-\\s+\\[x\\]\\s+\\*\\*${escaped}\\*\\*`, "mi");
-  if (complete.test(current)) return "already-complete";
-  if (!open.test(current)) return "not-found";
-
-  const updated = current.replace(open, "$1x]$2");
+  const task = new RegExp(`^(\\s*-\\s+\\[)([ xX])(\\]\\s+\\*\\*${escaped}\\*\\*)`, "m");
+  const match = task.exec(current);
+  if (!match) return "not-found";
+  const isComplete = match[2]!.toLowerCase() === "x";
+  if (isComplete === completed) return "already-complete";
+  const updated = current.replace(task, `$1${completed ? "x" : " "}$3`);
   const temporary = `${roadmap}.${process.pid}.tmp`;
   await writeFile(temporary, updated);
   await rename(temporary, roadmap);
   return "updated";
+}
+
+function projectMarkdownPath(root: string, relativePath: string): string {
+  if (!relativePath || path.isAbsolute(relativePath) || path.extname(relativePath).toLowerCase() !== ".md") {
+    throw new Error("Roadmap path must be a project-relative .md file");
+  }
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, relativePath);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (relative === "") return resolved;
+    throw new Error("Roadmap path must stay inside the project");
+  }
+  return resolved;
 }

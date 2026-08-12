@@ -7,6 +7,55 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 const execute = promisify(execFile);
+const cli = path.resolve("src/cli.ts");
+
+async function runCli(...args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return execute(process.execPath, ["--import", "tsx", cli, ...args]);
+}
+
+test("init bootstraps a usable ignored local-memory project without overwriting master files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-init-"));
+  await writeFile(path.join(root, "AGENTS.md"), "# Existing contract\n");
+  const receipt = JSON.parse((await runCli("init", "--root", root, "--json")).stdout) as { root: string; created: string[] };
+  assert.equal(receipt.root, root);
+  assert.ok(receipt.created.includes("orchbun.yaml"));
+  assert.ok(receipt.created.includes("ROADMAP.md"));
+  assert.doesNotMatch(await readFile(path.join(root, "AGENTS.md"), "utf8"), /Agent workflow/);
+  assert.match(await readFile(path.join(root, ".gitignore"), "utf8"), /^memory\/$/m);
+  assert.match(await readFile(path.join(root, "memory", "agents", "working", "project-state.md"), "utf8"), /Project state/);
+
+  const second = JSON.parse((await runCli("init", "--root", root, "--json")).stdout) as { created: string[] };
+  assert.deepEqual(second.created, []);
+});
+
+test("CLI maintenance operations and dry-run agent context have useful outputs", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-audit-"));
+  await runCli("init", "--root", root);
+  assert.match((await runCli("memory", "show", "--root", root)).stdout, /Project state/);
+  assert.equal((await runCli("memory", "runs", "--root", root)).stdout, "");
+  assert.match((await runCli("memory", "rebuild", "--root", root)).stdout, /rebuilt/i);
+  assert.deepEqual(JSON.parse((await runCli("memory", "verify", "--root", root)).stdout).issues, []);
+  assert.equal(JSON.parse((await runCli("memory", "sleep", "--dry-run", "--json", "--root", root)).stdout).published, false);
+  assert.equal(JSON.parse((await runCli("memory", "sweep", "--dry-run", "--json", "--root", root)).stdout).dryRun, true);
+  assert.equal(JSON.parse((await runCli("memory", "compact", "--all", "--json", "--root", root)).stdout).requested, 0);
+  const context = JSON.parse((await runCli("context", "--prompt", "Review the project", "--json", "--root", root)).stdout) as { expandedPrompt: string };
+  assert.match(context.expandedPrompt, /Review the project/);
+  const dryRun = JSON.parse((await runCli("run", "--prompt", "Review safely", "--dry-run", "--json", "--root", root)).stdout) as { expandedPrompt: string };
+  assert.match(dryRun.expandedPrompt, /Review safely/);
+});
+
+test("CLI rejects removed, unknown, missing-value, and command-irrelevant options", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-options-"));
+  await runCli("init", "--root", root);
+  await assert.rejects(runCli("/compact", "--all", "--root", root), /Unknown command/);
+  await assert.rejects(runCli("memory", "verify", "--json", "--root", root), /not supported/);
+  await assert.rejects(runCli("memory", "web", "--port", "70000", "--root", root), /between 1 and 65535/);
+  await assert.rejects(runCli("memory", "show", "--bogus", "--root", root), /not supported/);
+  await assert.rejects(runCli("context", "--prompt", "x", "--model", "--root", root), /--model requires a value/);
+  await assert.rejects(runCli("context", "--prompt", "x", "--prompt", "y", "--root", root), /more than once/);
+  await assert.rejects(runCli("context", "--prompt-file", "../outside.md", "--root", root), /stay inside the project/);
+  await assert.rejects(runCli("delegate", "--prompt", "x", "--root", root), /managed Orchbun run/);
+});
 
 test("memory compact publishes an accepted manifest from the manual CLI", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-compact-"));
@@ -30,7 +79,6 @@ artifacts: []
 supersedes: []
 `);
 
-  const cli = path.resolve("src/cli.ts");
   const { stdout } = await execute(process.execPath, [
     "--import", "tsx", cli,
     "memory", "compact",
@@ -74,7 +122,6 @@ supersedes: []
 `);
   }
 
-  const cli = path.resolve("src/cli.ts");
   const args = ["--import", "tsx", cli, "memory", "compact", "--all", "--root", root, "--json"];
   const first = JSON.parse((await execute(process.execPath, args)).stdout) as { requested: number; compacted: unknown[]; skipped: number };
   assert.equal(first.requested, 2);
@@ -121,7 +168,6 @@ test("memory sleep previews and publishes roadmap-reconciled active tasks", asyn
 - **Verification:** Reviewed roadmap state.
 `);
 
-  const cli = path.resolve("src/cli.ts");
   const base = ["--import", "tsx", cli, "memory", "sleep", "--root", root, "--json"];
   const preview = JSON.parse((await execute(process.execPath, [...base, "--dry-run"])).stdout) as {
     published: boolean;
