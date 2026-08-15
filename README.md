@@ -10,7 +10,7 @@ The memory server binds to `127.0.0.1`. Project memory stays in the project, is 
 
 - Review-first agent runs with explicit work mode and bounded delegation.
 - Immutable run journals plus compact direct-agent notes.
-- Five persistent memory pages: project state, tasks, decisions, APIs/contracts, and risks/blockers.
+- Five persistent memory pages: project state, tasks, decisions, operational constraints, and risks/blockers.
 - Markdown preview, syntax-colored raw view, and textarea editing in the local web workspace.
 - A roadmap-backed Tasks page with Active, Blocked, and Done views.
 - Severity and business-urgency selectors for tasks and risks, deriving P1–P5 action levels.
@@ -142,7 +142,9 @@ project/
 
 Raw prompts and native provider responses are retained for audit but never loaded automatically into future prompts. `memory/design/` is also opt-in context only.
 
-Direct notes use `memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md` and record Agent, Recorded at, Task, Outcome, Decisions, Risks or blockers, Next actions, Changed files, Verification, and Status. `Supersedes` can retire obsolete state without deleting history.
+Direct notes use `memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md` and record Agent, Recorded at, Task, Outcome, Decisions, Risks or blockers, Next actions, Changed files, Verification, and Status. `Supersedes` can retire obsolete state without deleting history. Optional `Subjects` entries use stable lowercase keys such as `memory/sleep` for deterministic grouping.
+
+`memory sleep` resolves transitive supersession and lifecycle status before selecting follow-ups. Its content-addressed snapshot also contains a stable subject index: explicit `Subjects` first, exact roadmap task IDs second, and `unclassified` as the fallback. Multiple current heads under one subject are reported as parallel heads rather than merged implicitly.
 
 ## Accepted milestone compaction
 

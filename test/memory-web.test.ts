@@ -14,6 +14,7 @@ test("memory web loads only generated working-memory pages", async () => {
   assert.equal(snapshot.pages.length, 5);
   assert.match(snapshot.pages[0]!.markdown, /Safe/);
   assert.equal(snapshot.pages[1]!.markdown, "No memory has been generated yet.\n");
+  assert.equal(snapshot.pages[3]!.title, "Operational constraints");
 });
 
 test("memory web escapes memory text before rendering", () => {

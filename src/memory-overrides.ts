@@ -5,7 +5,7 @@ export const MEMORY_PAGE_DEFINITIONS = [
   ["project-state", "Project state", "project-state.md"],
   ["active-tasks", "Tasks", "active-tasks.md"],
   ["decisions", "Decisions", "decisions.md"],
-  ["contracts", "APIs and contracts", "contracts.md"],
+  ["contracts", "Operational constraints", "contracts.md"],
   ["risks", "Risks and blockers", "risks.md"],
 ] as const;
 

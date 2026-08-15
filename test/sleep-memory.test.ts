@@ -31,6 +31,7 @@ async function directNote(
   slug: string,
   task: string,
   nextAction: string,
+  extra = "",
 ): Promise<void> {
   const directory = path.join(memoryRoot, "direct", timestamp.slice(0, 4), timestamp.slice(4, 6));
   await mkdir(directory, { recursive: true });
@@ -43,6 +44,7 @@ async function directNote(
 - **Next actions:** ${nextAction}
 - **Changed files:** None
 - **Verification:** Test fixture.
+${extra}
 `);
 }
 
@@ -68,10 +70,10 @@ test("sleep publishes only the first incomplete milestone and rebuild keeps it r
   await journal.initialize();
   await writeFile(path.join(root, "ROADMAP.md"), roadmap);
   await directNote(memoryRoot, "20260810T120000Z", "old-foundation", "HEX-A1 foundation", "Reopen HEX-A1.");
-  await directNote(memoryRoot, "20260810T120100Z", "old-board", "HEX-B1 board", "Use the old HEX-B1 action.");
-  await directNote(memoryRoot, "20260810T120200Z", "new-board", "HEX-B1 board", "Use the current HEX-B1 action.");
+  await directNote(memoryRoot, "20260810T120100Z", "old-board", "HEX-B1 board", "Use the old HEX-B1 action.", "- **Subjects:** memory/board");
+  await directNote(memoryRoot, "20260810T120200Z", "new-board", "HEX-B1 board", "Use the current HEX-B1 action.", "- **Subjects:** memory/board\n- **Supersedes:** 20260810T120100Z-old-board");
   await directNote(memoryRoot, "20260810T120300Z", "future-campaign", "HEX-C1 campaign", "Start HEX-C1 now.");
-  await directNote(memoryRoot, "20260810T120400Z", "unlinked", "Investigate deployment", "Check the server.");
+  await directNote(memoryRoot, "20260810T120400Z", "unlinked", "Investigate deployment", "Check the server.", "- **Subjects:** memory/board");
 
   const preview = await sleepMemory(root, journal, { publish: false });
   assert.equal(preview.published, false);
@@ -82,6 +84,19 @@ test("sleep publishes only the first incomplete milestone and rebuild keeps it r
   assert.ok(preview.snapshot.excludedFollowups.some((item) => item.reason === "completed-roadmap-task"));
   assert.ok(preview.snapshot.excludedFollowups.some((item) => item.reason === "scheduled-roadmap-task"));
   assert.ok(preview.snapshot.excludedFollowups.some((item) => item.reason === "unlinked-followup"));
+  assert.deepEqual(preview.snapshot.subjects.find((subject) => subject.key === "memory/board"), {
+    key: "memory/board",
+    currentHeadIds: ["20260810T120400Z-unlinked", "20260810T120200Z-new-board"],
+    parallelHeads: true,
+    lineages: [
+      { headId: "20260810T120400Z-unlinked", noteIds: ["20260810T120400Z-unlinked"] },
+      {
+        headId: "20260810T120200Z-new-board",
+        noteIds: ["20260810T120200Z-new-board", "20260810T120100Z-old-board"],
+      },
+    ],
+  });
+  assert.ok(preview.snapshot.subjects.some((subject) => subject.key === "HEX-B1"));
 
   const published = await sleepMemory(root, journal, { publish: true });
   assert.equal(published.snapshot.snapshotId, preview.snapshot.snapshotId);
@@ -91,7 +106,7 @@ test("sleep publishes only the first incomplete milestone and rebuild keeps it r
   assert.match(active, /HEX-B2 · Playable/);
   assert.doesNotMatch(active, /HEX-A1|HEX-C1|deployment/i);
 
-  await directNote(memoryRoot, "20260810T120500Z", "latest-board", "HEX-B1 board", "Ship the final HEX-B1 change.");
+  await directNote(memoryRoot, "20260810T120500Z", "latest-board", "HEX-B1 board", "Ship the final HEX-B1 change.", "- **Subjects:** memory/board\n- **Supersedes:** 20260810T120200Z-new-board");
   await rebuildMemory(journal, root);
   const rebuilt = await readFile(path.join(memoryRoot, "working", "active-tasks.md"), "utf8");
   assert.match(rebuilt, /Ship the final HEX-B1 change/);

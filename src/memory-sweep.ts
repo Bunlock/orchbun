@@ -1,6 +1,6 @@
 import { cp, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { loadDirectMemory, type DirectMemoryNote } from "./direct-memory.js";
+import { loadDirectMemory, resolveDirectMemory, type DirectMemoryNote } from "./direct-memory.js";
 import { loadRuns, rebuildMemoryUnlocked, verifyMemory } from "./memory.js";
 import { loadApprovedMilestoneManifest, readCompactState } from "./milestone-memory.js";
 import type { RunJournal } from "./journal.js";
@@ -40,7 +40,7 @@ export async function sweepMemory(journal: RunJournal, options: MemorySweepOptio
     const direct = await loadDirectMemory(journal.memoryRoot);
     if (direct.issues.length) throw new Error(`Direct memory validation failed:\n${direct.issues.map((issue) => `- ${issue}`).join("\n")}`);
     const baseline = await latestAcceptedBaseline(journal.memoryRoot);
-    const superseded = transitiveSuperseded(direct.notes);
+    const superseded = resolveDirectMemory(direct.notes).supersededNoteIds;
     const archiveNotes = direct.notes.filter((note) => note.status !== "active" || superseded.has(note.id));
     const retirementCandidates = baseline
       ? direct.notes.filter((note) => note.status === "active" && !superseded.has(note.id) && note.timestamp <= baseline.acceptedAt).map((note) => note.id)
@@ -113,21 +113,6 @@ async function latestAcceptedBaseline(memoryRoot: string): Promise<{ milestone: 
   const current = compact ? [{ milestone: compact.milestone, acceptedAt: compact.publishedAt }] : [];
   return [...accepted.filter((item): item is { milestone: string; acceptedAt: string } => Boolean(item)), ...current]
     .sort((a, b) => b.acceptedAt.localeCompare(a.acceptedAt) || b.milestone.localeCompare(a.milestone))[0];
-}
-
-function transitiveSuperseded(notes: DirectMemoryNote[]): Set<string> {
-  const byId = new Map(notes.map((note) => [note.id, note]));
-  const stale = new Set<string>();
-  const visit = (id: string): void => {
-    if (stale.has(id)) return;
-    stale.add(id);
-    for (const target of byId.get(id)?.supersedes ?? []) visit(target);
-  };
-  for (const note of notes) {
-    if (note.status === "superseded") visit(note.id);
-    for (const target of note.supersedes) visit(target);
-  }
-  return stale;
 }
 
 function eligibleRun(startedAt: string, status: string, baseline: string, now: Date): boolean {

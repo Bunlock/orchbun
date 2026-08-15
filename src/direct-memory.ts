@@ -10,6 +10,7 @@ This directory stores compact memory notes from agents prompted outside Orchbun.
 - Record \`Agent\`, \`Recorded at\`, task, outcome, decisions, risks or blockers, next actions, changed files, verification, and \`Status\`.
 - \`Recorded at\` must match the UTC timestamp in the filename. \`Status\` is \`active\` unless explicitly set to \`retired\` or \`superseded\`; retired notes also need a \`Reason\`.
 - Optionally add \`Supersedes\` with one or more earlier note IDs to retire their current decisions, risks, and next actions without deleting history.
+- Optionally add \`Subjects\` with stable keys such as \`memory/sleep\` to support deterministic, non-semantic grouping.
 - Keep notes factual and compact. Do not place raw transcripts or secrets here.
 - Orchbun validates these notes and merges them into generated working memory.
 `;
@@ -27,6 +28,7 @@ export interface DirectMemoryNote {
   changedFiles: string[];
   verification: string[];
   supersedes: string[];
+  subjects: string[];
   agent?: string;
   recordedAt?: string;
   status: "active" | "retired" | "superseded";
@@ -38,7 +40,7 @@ export interface DirectMemoryLoadResult {
   issues: string[];
 }
 
-type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes";
+type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes" | "subjects";
 
 const FIELD_NAMES: Record<string, FieldName> = {
   agent: "agent",
@@ -53,6 +55,7 @@ const FIELD_NAMES: Record<string, FieldName> = {
   status: "status",
   reason: "reason",
   supersedes: "supersedes",
+  subjects: "subjects",
 };
 const REQUIRED_LABELS = ["task", "outcome", "decisions", "risks or blockers", "next actions", "changed files", "verification"];
 const NOTE_FILE = /^(\d{8}T\d{6}Z)-([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.md$/;
@@ -113,6 +116,7 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
       changedFiles: meaningful(parsed.values.changedFiles),
       verification: meaningful(parsed.values.verification),
       supersedes: meaningful(parsed.values.supersedes),
+      subjects: meaningful(parsed.values.subjects),
       ...(agent ? { agent } : {}),
       ...(recordedAt ? { recordedAt } : {}),
       status: status as DirectMemoryNote["status"],
@@ -121,14 +125,93 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
   }
 
   notes.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
-  const ids = new Set(notes.map((note) => note.id));
+  // A sweep moves superseded notes to archive/direct while leaving the
+  // successor active. Archived IDs are still valid historical supersession
+  // targets; otherwise a successful sweep makes the next rebuild fail.
+  const ids = new Set([...notes.map((note) => note.id), ...await archivedDirectNoteIds(memoryRoot)]);
+  const notesById = new Map(notes.map((note) => [note.id, note]));
   for (const note of notes) {
+    for (const subject of note.subjects) {
+      if (!/^[a-z0-9][a-z0-9/_-]*$/.test(subject)) issues.push(`${note.relativePath}: invalid subject ${subject}`);
+    }
     for (const target of note.supersedes) {
       if (target === note.id) issues.push(`${note.relativePath}: a note cannot supersede itself`);
       else if (!ids.has(target)) issues.push(`${note.relativePath}: unknown superseded note ${target}`);
+      else {
+        const targetNote = notesById.get(target);
+        if (targetNote && targetNote.timestamp >= note.timestamp) issues.push(`${note.relativePath}: superseded note ${target} must be older`);
+      }
     }
   }
+  issues.push(...supersessionCycleIssues(notes));
   return { notes, issues };
+}
+
+export interface DirectMemoryResolution {
+  currentNotes: DirectMemoryNote[];
+  supersededNoteIds: Set<string>;
+  inactiveNoteIds: Set<string>;
+  lineages: Map<string, string[]>;
+}
+
+/** Resolves immutable lifecycle records once for rebuild, Sleep, and sweep. */
+export function resolveDirectMemory(notes: DirectMemoryNote[]): DirectMemoryResolution {
+  const byId = new Map(notes.map((note) => [note.id, note]));
+  const supersededNoteIds = new Set<string>();
+  const collect = (id: string): void => {
+    if (supersededNoteIds.has(id)) return;
+    supersededNoteIds.add(id);
+    for (const target of byId.get(id)?.supersedes ?? []) collect(target);
+  };
+  for (const note of notes) {
+    if (note.status === "superseded") collect(note.id);
+    for (const target of note.supersedes) collect(target);
+  }
+  const inactiveNoteIds = new Set(notes.filter((note) => note.status !== "active" || supersededNoteIds.has(note.id)).map((note) => note.id));
+  const currentNotes = notes.filter((note) => !inactiveNoteIds.has(note.id));
+  const lineages = new Map(currentNotes.map((note) => [note.id, lineage(note.id, byId)]));
+  return { currentNotes, supersededNoteIds, inactiveNoteIds, lineages };
+}
+
+function lineage(headId: string, byId: Map<string, DirectMemoryNote>): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  const visit = (id: string): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    output.push(id);
+    for (const target of byId.get(id)?.supersedes ?? []) visit(target);
+  };
+  visit(headId);
+  return output;
+}
+
+function supersessionCycleIssues(notes: DirectMemoryNote[]): string[] {
+  const byId = new Map(notes.map((note) => [note.id, note]));
+  const visited = new Set<string>();
+  const active = new Set<string>();
+  const issues = new Set<string>();
+  const visit = (id: string): void => {
+    if (active.has(id)) {
+      issues.add(`supersession cycle includes ${id}`);
+      return;
+    }
+    if (visited.has(id)) return;
+    active.add(id);
+    for (const target of byId.get(id)?.supersedes ?? []) if (byId.has(target)) visit(target);
+    active.delete(id);
+    visited.add(id);
+  };
+  for (const note of notes) visit(note.id);
+  return [...issues].sort();
+}
+
+async function archivedDirectNoteIds(memoryRoot: string): Promise<string[]> {
+  const files = await markdownFiles(path.join(memoryRoot, "archive", "direct"));
+  return files.flatMap((file) => {
+    const match = NOTE_FILE.exec(path.basename(file));
+    return match ? [path.basename(file, ".md")] : [];
+  });
 }
 
 export function assertValidDirectMemory(result: DirectMemoryLoadResult): void {
@@ -159,7 +242,7 @@ async function markdownFiles(root: string): Promise<string[]> {
 
 function parseFields(text: string): { values: Record<FieldName, string[]>; present: Set<string> } {
   const values: Record<FieldName, string[]> = {
-    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [],
+    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [], subjects: [],
   };
   const present = new Set<string>();
   let current: FieldName | undefined;

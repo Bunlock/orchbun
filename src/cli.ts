@@ -165,7 +165,7 @@ async function main(): Promise<void> {
       } else {
         console.log(renderActiveTasks(receipt.snapshot.activeTasks).trimEnd());
         console.log(`\n${receipt.published ? `Sleep snapshot published at ${receipt.snapshotPath}` : "Dry run; no memory files changed."}`);
-        console.log(`${receipt.snapshot.activeTasks.length} active · ${receipt.snapshot.scheduledTasks.length} scheduled · ${receipt.snapshot.excludedFollowups.length} excluded follow-up(s)`);
+        console.log(`${receipt.snapshot.activeTasks.length} active · ${receipt.snapshot.scheduledTasks.length} scheduled · ${receipt.snapshot.subjects.length} subjects · ${receipt.snapshot.excludedFollowups.length} excluded follow-up(s)`);
       }
       return;
     }

@@ -34,7 +34,7 @@ export class RunJournal {
     await this.writeIfMissing(path.join(this.memoryRoot, "working", "project-state.md"), "# Project state\n\nNo managed runs recorded.\n");
     await this.writeIfMissing(path.join(this.memoryRoot, "working", "active-tasks.md"), "# Active tasks\n\nNo active tasks recorded.\n");
     await this.writeIfMissing(path.join(this.memoryRoot, "working", "decisions.md"), "# Decisions\n\nNo decisions recorded.\n");
-    await this.writeIfMissing(path.join(this.memoryRoot, "working", "contracts.md"), "# APIs and contracts\n\nNo APIs or contracts recorded.\n");
+    await this.writeIfMissing(path.join(this.memoryRoot, "working", "contracts.md"), "# Operational constraints\n\nNo operational constraints recorded.\n");
     await this.writeIfMissing(path.join(this.memoryRoot, "working", "risks.md"), "# Risks and blockers\n\nNo risks recorded.\n");
   }
 

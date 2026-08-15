@@ -264,7 +264,7 @@ export async function writeCompactWorking(directory: string, state: CompactState
     writeFile(path.join(directory, "project-state.md"), project),
     writeFile(path.join(directory, "active-tasks.md"), `# Active tasks\n\n${markdownList(state.baseline.pendingWork, "No pending work recorded.")}\n`),
     writeFile(path.join(directory, "decisions.md"), `# Decisions\n\n${markdownList(state.baseline.decisions, "No decisions recorded.")}\n`),
-    writeFile(path.join(directory, "contracts.md"), `# APIs and contracts\n\n${markdownList(state.baseline.contracts, "No APIs or contracts recorded.")}\n`),
+    writeFile(path.join(directory, "contracts.md"), `# Operational constraints\n\n${markdownList(state.baseline.contracts, "No operational constraints recorded.")}\n`),
     writeFile(path.join(directory, "risks.md"), `# Risks and blockers\n\n${markdownList(state.baseline.risks, "No risks recorded.")}\n`),
     writeFile(path.join(directory, "compact-state.json"), `${JSON.stringify(state, null, 2)}\n`),
   ]);

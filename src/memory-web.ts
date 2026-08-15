@@ -81,7 +81,7 @@ export async function runMemoryAction(action: MemoryAction, journal: RunJournal,
   }
   if (action === "sleep-preview" || action === "sleep-publish") {
     const receipt = await sleepMemory(projectRoot, journal, { publish: action === "sleep-publish" });
-    return `${receipt.published ? "Sleep snapshot published." : "Sleep preview; no files changed."}\n${receipt.snapshot.activeTasks.length} active · ${receipt.snapshot.scheduledTasks.length} scheduled · ${receipt.snapshot.excludedFollowups.length} excluded follow-up(s)`;
+    return `${receipt.published ? "Sleep snapshot published." : "Sleep preview; no files changed."}\n${receipt.snapshot.activeTasks.length} active · ${receipt.snapshot.scheduledTasks.length} scheduled · ${receipt.snapshot.subjects.length} subjects · ${receipt.snapshot.excludedFollowups.length} excluded follow-up(s)`;
   }
   if (action === "sweep-preview" || action === "sweep-publish") {
     const receipt = await sweepMemory(journal, { dryRun: action === "sweep-preview", projectRoot });

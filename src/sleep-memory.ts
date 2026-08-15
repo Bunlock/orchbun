@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
+import { assertValidDirectMemory, loadDirectMemory, resolveDirectMemory, type DirectMemoryNote } from "./direct-memory.js";
 import type { RunJournal } from "./journal.js";
 import { loadRuns } from "./memory.js";
 import { readCompactState } from "./milestone-memory.js";
@@ -23,6 +23,13 @@ export interface ExcludedFollowup {
   reason: "completed-roadmap-task" | "scheduled-roadmap-task" | "unlinked-followup";
 }
 
+export interface SleepSubject {
+  key: string;
+  currentHeadIds: string[];
+  parallelHeads: boolean;
+  lineages: Array<{ headId: string; noteIds: string[] }>;
+}
+
 export interface SleepSnapshot {
   schemaVersion: 1;
   snapshotId: string;
@@ -35,6 +42,7 @@ export interface SleepSnapshot {
   activeTasks: SleepTask[];
   scheduledTasks: SleepTask[];
   excludedFollowups: ExcludedFollowup[];
+  subjects: SleepSubject[];
   sourceCounts: {
     managedRuns: number;
     directNotes: number;
@@ -186,6 +194,7 @@ async function buildSleepSnapshot(root: string, journal: RunJournal): Promise<Sl
     activeTasks,
     scheduledTasks,
     excludedFollowups: uniqueExcluded(excludedFollowups),
+    subjects: followupResult.subjects,
     sourceCounts: followupResult.counts,
   };
   return {
@@ -209,6 +218,7 @@ function sleepTask(task: RoadmapTask, status: SleepTask["status"], followup?: Fo
 async function loadFollowups(journal: RunJournal, roadmap: RoadmapState): Promise<{
   followups: Followup[];
   counts: SleepSnapshot["sourceCounts"];
+  subjects: SleepSubject[];
 }> {
   const [runs, direct, compact] = await Promise.all([
     loadRuns(journal),
@@ -218,7 +228,7 @@ async function loadFollowups(journal: RunJournal, roadmap: RoadmapState): Promis
   assertValidDirectMemory(direct);
   const includedRunIds = new Set(compact?.includedManagedRunIds ?? []);
   const includedDirectIds = new Set(compact?.includedDirectNoteIds ?? []);
-  const supersededDirectIds = new Set(direct.notes.flatMap((note) => note.supersedes));
+  const resolvedDirect = resolveDirectMemory(direct.notes);
   const followups: Followup[] = [];
 
   for (const run of runs) {
@@ -235,8 +245,8 @@ async function loadFollowups(journal: RunJournal, roadmap: RoadmapState): Promis
       });
     }
   }
-  for (const note of direct.notes) {
-    if (includedDirectIds.has(note.id) || supersededDirectIds.has(note.id)) continue;
+  for (const note of resolvedDirect.currentNotes) {
+    if (includedDirectIds.has(note.id)) continue;
     for (const nextAction of meaningful(note.nextActions)) {
       followups.push({
         sourceId: note.id,
@@ -266,7 +276,41 @@ async function loadFollowups(journal: RunJournal, roadmap: RoadmapState): Promis
       directNotes: direct.notes.length,
       followups: followups.length,
     },
+    subjects: buildSubjects(direct.notes, includedDirectIds, roadmap),
   };
+}
+
+function buildSubjects(notes: DirectMemoryNote[], includedIds: Set<string>, roadmap: RoadmapState): SleepSubject[] {
+  const byId = new Map(notes.map((note) => [note.id, note]));
+  const resolved = resolveDirectMemory(notes);
+  const grouped = new Map<string, Array<{ headId: string; noteIds: string[]; startedAt: string }>>();
+  for (const head of resolved.currentNotes) {
+    if (includedIds.has(head.id)) continue;
+    const noteIds = resolved.lineages.get(head.id) ?? [head.id];
+    const keys = new Set<string>();
+    for (const id of noteIds) {
+      const note = byId.get(id);
+      if (!note) continue;
+      for (const subject of note.subjects) keys.add(subject);
+      const searchable = [note.task, note.outcome, ...note.decisions, ...note.risks, ...note.nextActions, ...note.changedFiles].join("\n");
+      for (const taskId of roadmapReferences(searchable, roadmap)) keys.add(taskId);
+    }
+    if (!keys.size) keys.add("unclassified");
+    for (const key of keys) {
+      const entries = grouped.get(key) ?? [];
+      entries.push({ headId: head.id, noteIds, startedAt: head.timestamp });
+      grouped.set(key, entries);
+    }
+  }
+  return [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, entries]) => {
+    entries.sort((left, right) => right.startedAt.localeCompare(left.startedAt) || left.headId.localeCompare(right.headId));
+    return {
+      key,
+      currentHeadIds: entries.map((entry) => entry.headId),
+      parallelHeads: entries.length > 1,
+      lineages: entries.map(({ headId, noteIds }) => ({ headId, noteIds })),
+    };
+  });
 }
 
 function roadmapReferences(text: string, roadmap: RoadmapState): string[] {
