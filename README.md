@@ -122,6 +122,15 @@ orchbun memory compact --all
 
 `--prompt-file` and `--context` paths must stay inside the project. Review mode is read-only. Work mode must be explicit. Delegation is accepted only inside a managed work-mode run and is bounded by `orchbun.yaml`.
 
+To run a project-local command after a successful memory rebuild, configure the optional hook in `orchbun.yaml`:
+
+```yaml
+hooks:
+  after_memory_rebuild: node scripts/update-roadmap.mjs
+```
+
+The command runs through the system shell with the project root as its working directory. A non-zero exit makes the rebuild fail, so hook commands should be trusted, deterministic project tooling.
+
 ## Memory layout
 
 ```text

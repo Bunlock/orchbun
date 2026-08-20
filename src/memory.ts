@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
+import { CONFIG_FILE, loadConfig, pathExists } from "./config.js";
 import { assertValidDirectMemory, loadDirectMemory, resolveDirectMemory } from "./direct-memory.js";
 import { ImageGenerationJournal } from "./image-generation/journal.js";
 import { metadataFromYaml, RunJournal } from "./journal.js";
@@ -64,6 +66,25 @@ export async function loadRuns(journal: RunJournal): Promise<RecordedRun[]> {
 
 export async function rebuildMemory(journal: RunJournal, projectRoot?: string): Promise<void> {
   await journal.withProjectionLock(() => rebuildMemoryUnlocked(journal, projectRoot));
+  if (projectRoot) await runAfterMemoryRebuildHook(projectRoot);
+}
+
+async function runAfterMemoryRebuildHook(projectRoot: string): Promise<void> {
+  if (!(await pathExists(path.join(projectRoot, CONFIG_FILE)))) return;
+  const command = (await loadConfig(projectRoot)).hooks.after_memory_rebuild?.trim();
+  if (!command) return;
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, {
+      cwd: projectRoot,
+      shell: true,
+      stdio: "inherit",
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) return resolve();
+      reject(new Error(`after_memory_rebuild hook failed${signal ? ` with signal ${signal}` : ` with exit code ${code ?? "unknown"}`}: ${command}`));
+    });
+  });
 }
 
 /** Caller must hold the projection lock. */

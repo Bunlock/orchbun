@@ -27,6 +27,20 @@ const validResult = {
   verification: [],
 };
 
+test("memory rebuild runs the configured hook from the project root", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-memory-hook-"));
+  const journal = new RunJournal(path.join(root, "memory", "agents"));
+  await journal.initialize();
+  await writeFile(path.join(root, "orchbun.yaml"), `version: 1
+hooks:
+  after_memory_rebuild: node -e "require('node:fs').writeFileSync('hook-ran.txt', 'yes')"
+`);
+
+  await rebuildMemory(journal, root);
+
+  assert.equal(await readFile(path.join(root, "hook-ran.txt"), "utf8"), "yes");
+});
+
 test("direct memory resolves transitive supersession before lifecycle projections", () => {
   const note = (id: string, timestamp: string, status: DirectMemoryNote["status"], supersedes: string[]): DirectMemoryNote => ({
     id,

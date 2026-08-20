@@ -24,6 +24,9 @@ export interface OrchbunConfig {
     pollIntervalMs: number;
     timeoutMs: number;
   };
+  hooks: {
+    after_memory_rebuild?: string;
+  };
 }
 
 export const CONFIG_FILE = "orchbun.yaml";
@@ -49,6 +52,7 @@ export const DEFAULT_CONFIG: OrchbunConfig = {
     pollIntervalMs: 2_000,
     timeoutMs: 120_000,
   },
+  hooks: {},
 };
 
 export async function pathExists(candidate: string): Promise<boolean> {
@@ -79,6 +83,7 @@ export async function loadConfig(root: string): Promise<OrchbunConfig> {
     agents: { ...DEFAULT_CONFIG.agents, ...parsed.agents },
     delegation: { ...DEFAULT_CONFIG.delegation, ...parsed.delegation },
     images: { ...DEFAULT_CONFIG.images, ...parsed.images },
+    hooks: { ...DEFAULT_CONFIG.hooks, ...parsed.hooks },
   };
 }
 
