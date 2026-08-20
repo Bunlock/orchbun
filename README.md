@@ -9,6 +9,7 @@ The memory server binds to `127.0.0.1`. Project memory stays in the project, is 
 ## What 1.0 includes
 
 - Review-first agent runs with explicit work mode and bounded delegation.
+- Optional managed work-run isolation with retained Git worktrees and narrowly mediated Compose runtimes.
 - Immutable run journals plus compact direct-agent notes.
 - Five persistent memory pages: project state, tasks, decisions, operational constraints, and risks/blockers.
 - Markdown preview, syntax-colored raw view, and textarea editing in the local web workspace.
@@ -99,6 +100,12 @@ OrchBun rejects unknown options and options that do not apply to the selected co
 | `orchbun context` | Print the exact bounded context without invoking an agent | run options, `--json` |
 | `orchbun run` | Run an agent; review mode is the default | `--agent`, `--prompt`/`--prompt-file`, `--task`, `--mode`, `--context`, `--model`, `--dry-run`, `--json`, `--root` |
 | `orchbun delegate` | Run a bounded child from a managed work-mode parent | run options |
+| `orchbun workspaces list` | List retained managed worktree leases | `--json`, `--root` |
+| `orchbun workspaces inspect` | Inspect one worktree/runtime lease | `--run`, `--json`, `--root` |
+| `orchbun workspaces cleanup` | Remove one clean, merged worktree and its isolated runtime data | `--run`, `--json`, `--root` |
+| `orchbun runtime status` | Show the current run's allowlisted Compose status | managed isolated runs only |
+| `orchbun runtime rebuild` | Rebuild/recreate the current run's configured services | managed isolated runs only |
+| `orchbun runtime logs` | Read the last 200 lines from the current run's configured services | managed isolated runs only |
 | `orchbun memory show` | Rebuild and print the five working pages | `--root` |
 | `orchbun memory runs` | List managed runs and direct notes | `--root` |
 | `orchbun memory rebuild` | Regenerate projections and reapply local overrides | `--root` |
@@ -131,6 +138,34 @@ hooks:
 
 The command runs through the system shell with the project root as its working directory. A non-zero exit makes the rebuild fail, so hook commands should be trusted, deterministic project tooling.
 
+## Managed work-run isolation
+
+Isolation is opt-in. When enabled, each top-level work-mode run branches from the clean tracked `HEAD` into an ignored worktree under `memory/agents/worktrees/`. Review runs stay in the control checkout. Delegates inherit their parent's worktree and optional runtime, so they can inspect the same uncommitted changes instead of receiving a disconnected checkout.
+
+```yaml
+isolation:
+  enabled: true
+  branchPrefix: orchbun/
+  worktreeDir: memory/agents/worktrees
+  runtime:
+    driver: compose
+    composeFiles: [docker-compose.yml]
+    services: [postgres, backend]
+    projectPrefix: orchbun-myapp
+    frontendPorts: [4201, 4299]
+    backendPorts: [3201, 3299]
+    databasePorts: [5501, 5599]
+    backendPortEnv: BACKEND_PORT
+    databasePortEnv: POSTGRES_PORT
+    frontendUrlEnv: FRONTEND_URL
+    healthUrl: http://127.0.0.1:{backendPort}/healthz
+    healthTimeoutMs: 120000
+```
+
+The Compose project name, ports, endpoint environment, service allowlist, and Compose files come only from the recorded lease and trusted project configuration. During the run, a local run-scoped broker accepts only `status`, `rebuild`, and bounded `logs`; it does not accept arbitrary Docker or Compose arguments. The agent process is not put in Docker and is instructed not to invoke Docker directly. Adapter sandboxing remains part of the security boundary: this feature does not make an otherwise unrestricted same-user shell safe against deliberate Docker access.
+
+At the end of a run, Orchbun stops the Compose project without deleting its isolated volumes and retains the branch/worktree for human review. `orchbun workspaces cleanup --run <id>` refuses dirty worktrees and branches not merged into the control checkout; after those checks pass, it removes only that lease's Compose volumes, worktree, and branch. Lease metadata remains under ignored memory for audit. The normal project stack and its ports are never selected by the allocator unless explicitly placed in the configured ranges.
+
 ## Memory layout
 
 ```text
@@ -144,6 +179,8 @@ project/
       manual/               persistent web edits and qualifications
       milestones/           accepted manifests
       runs/                 immutable managed-run journals
+      leases/               worktree/runtime lease receipts
+      worktrees/            retained isolated work checkouts
       working/              generated projections
       archive/              compaction and sweep snapshots
       sleep/                deterministic reconciliation snapshots

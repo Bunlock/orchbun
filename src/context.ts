@@ -11,6 +11,7 @@ interface ContextOptions {
   mode: RunMode;
   contextFiles: string[];
   allowDelegation: boolean;
+  runtimeAvailable?: boolean;
 }
 
 interface Candidate {
@@ -28,30 +29,34 @@ const WORKING_FILES = [
   "working/risks.md",
 ] as const;
 
-function contract(mode: RunMode, allowDelegation: boolean): string {
+function contract(mode: RunMode, allowDelegation: boolean, runtimeAvailable: boolean): string {
   const permissions = mode === "review"
     ? "MODE: REVIEW. Inspect and report only. Do not edit files, create files, install packages, commit, or run mutating commands."
     : "MODE: WORK. You may edit project files and run verification needed for this task.";
   const delegation = allowDelegation
     ? "For a bounded subtask, you may run: pnpm orchbun delegate --agent claude --prompt \"...\". Delegates default to REVIEW. Use --mode work only when edits are necessary."
     : "Do not delegate this run.";
-  return `${permissions}\n${delegation}\nReturn only one JSON object matching the supplied schema. Be concise and factual. Record only material outcomes, file changes, decisions, risks, blockers, next actions, and verification you actually performed.`;
+  const runtime = runtimeAvailable
+    ? "This run has an Orchbun-managed runtime. Use only `orchbun runtime status`, `orchbun runtime rebuild`, and `orchbun runtime logs`; do not invoke Docker directly."
+    : "No Orchbun-managed runtime is available for this run.";
+  return `${permissions}\n${delegation}\n${runtime}\nReturn only one JSON object matching the supplied schema. Be concise and factual. Record only material outcomes, file changes, decisions, risks, blockers, next actions, and verification you actually performed.`;
 }
 
 export async function buildContextPacket(
-  root: string,
+  controlRoot: string,
   config: OrchbunConfig,
   options: ContextOptions,
+  workspaceRoot = controlRoot,
 ): Promise<ContextPacket> {
   const candidates: Candidate[] = [];
-  const localMemory = memoryRoot(root, config);
+  const localMemory = memoryRoot(controlRoot, config);
 
   for (const [index, relative] of WORKING_FILES.entries()) {
     const absolute = path.join(localMemory, relative);
     if (await pathExists(absolute)) {
       candidates.push({
         label: "WORKING MEMORY",
-        relativePath: path.relative(root, absolute),
+        relativePath: path.relative(controlRoot, absolute),
         priority: 100 - index,
         text: await readFile(absolute, "utf8"),
       });
@@ -59,7 +64,7 @@ export async function buildContextPacket(
   }
 
   for (const relativePath of options.contextFiles) {
-    const absolute = safeWorkspacePath(root, relativePath);
+    const absolute = safeWorkspacePath(workspaceRoot, relativePath);
     if (!(await pathExists(absolute))) throw new Error(`Context file does not exist: ${relativePath}`);
     candidates.push({
       label: "EXPLICIT CONTEXT",
@@ -70,7 +75,7 @@ export async function buildContextPacket(
   }
 
   candidates.sort((a, b) => b.priority - a.priority || a.relativePath.localeCompare(b.relativePath));
-  const header = contract(options.mode, options.allowDelegation);
+  const header = contract(options.mode, options.allowDelegation, options.runtimeAvailable === true);
   const task = options.taskId ? `TASK: ${options.taskId}\n` : "";
   const request = `[REQUEST]\n${task}${options.sourcePrompt}`;
   const sections: string[] = [];

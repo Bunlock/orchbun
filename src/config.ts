@@ -27,6 +27,25 @@ export interface OrchbunConfig {
   hooks: {
     after_memory_rebuild?: string;
   };
+  isolation: {
+    enabled: boolean;
+    branchPrefix: string;
+    worktreeDir: string;
+    runtime: {
+      driver: "none" | "compose";
+      composeFiles: string[];
+      services: string[];
+      projectPrefix: string;
+      frontendPorts: [number, number];
+      backendPorts: [number, number];
+      databasePorts: [number, number];
+      backendPortEnv: string;
+      databasePortEnv: string;
+      frontendUrlEnv: string;
+      healthUrl?: string;
+      healthTimeoutMs: number;
+    };
+  };
 }
 
 export const CONFIG_FILE = "orchbun.yaml";
@@ -53,6 +72,24 @@ export const DEFAULT_CONFIG: OrchbunConfig = {
     timeoutMs: 120_000,
   },
   hooks: {},
+  isolation: {
+    enabled: false,
+    branchPrefix: "orchbun/",
+    worktreeDir: "memory/agents/worktrees",
+    runtime: {
+      driver: "none",
+      composeFiles: ["docker-compose.yml"],
+      services: [],
+      projectPrefix: "orchbun",
+      frontendPorts: [4201, 4299],
+      backendPorts: [3201, 3299],
+      databasePorts: [5501, 5599],
+      backendPortEnv: "BACKEND_PORT",
+      databasePortEnv: "POSTGRES_PORT",
+      frontendUrlEnv: "FRONTEND_URL",
+      healthTimeoutMs: 120_000,
+    },
+  },
 };
 
 export async function pathExists(candidate: string): Promise<boolean> {
@@ -84,6 +121,14 @@ export async function loadConfig(root: string): Promise<OrchbunConfig> {
     delegation: { ...DEFAULT_CONFIG.delegation, ...parsed.delegation },
     images: { ...DEFAULT_CONFIG.images, ...parsed.images },
     hooks: { ...DEFAULT_CONFIG.hooks, ...parsed.hooks },
+    isolation: {
+      ...DEFAULT_CONFIG.isolation,
+      ...parsed.isolation,
+      runtime: {
+        ...DEFAULT_CONFIG.isolation.runtime,
+        ...parsed.isolation?.runtime,
+      },
+    },
   };
 }
 

@@ -1,6 +1,7 @@
 import type { AgentKind, AgentResult, AgentUsage, ContextPacket, RunMode } from "../types.js";
 
 export interface AdapterOptions {
+  controlRoot: string;
   root: string;
   temporaryDir: string;
   mode: RunMode;

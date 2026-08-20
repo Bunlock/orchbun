@@ -33,6 +33,7 @@ test("CLI maintenance operations and dry-run agent context have useful outputs",
   await runCli("init", "--root", root);
   assert.match((await runCli("memory", "show", "--root", root)).stdout, /Project state/);
   assert.equal((await runCli("memory", "runs", "--root", root)).stdout, "");
+  assert.equal((await runCli("workspaces", "list", "--root", root)).stdout, "");
   assert.match((await runCli("memory", "rebuild", "--root", root)).stdout, /rebuilt/i);
   assert.deepEqual(JSON.parse((await runCli("memory", "verify", "--root", root)).stdout).issues, []);
   assert.equal(JSON.parse((await runCli("memory", "sleep", "--dry-run", "--json", "--root", root)).stdout).published, false);
@@ -55,6 +56,9 @@ test("CLI rejects removed, unknown, missing-value, and command-irrelevant option
   await assert.rejects(runCli("context", "--prompt", "x", "--prompt", "y", "--root", root), /more than once/);
   await assert.rejects(runCli("context", "--prompt-file", "../outside.md", "--root", root), /stay inside the project/);
   await assert.rejects(runCli("delegate", "--prompt", "x", "--root", root), /managed Orchbun run/);
+  await assert.rejects(runCli("runtime", "status", "--root", root), /--root is not supported/);
+  await assert.rejects(runCli("runtime", "status"), /managed isolated work run/);
+  await assert.rejects(runCli("workspaces", "inspect", "--root", root), /--run is required/);
 });
 
 test("memory compact publishes an accepted manifest from the manual CLI", async () => {

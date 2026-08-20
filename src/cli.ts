@@ -11,6 +11,7 @@ import { Orchestrator, type RunOptions } from "./orchestrator.js";
 import { renderActiveTasks, sleepMemory } from "./sleep-memory.js";
 import type { AgentKind, RunMode } from "./types.js";
 import { initializeWorkspace } from "./init.js";
+import { inheritedIsolation, requestRuntimeCommand, type RuntimeCommand } from "./isolation.js";
 
 const HELP = `orchbun — local, token-efficient agent orchestration
 
@@ -19,6 +20,8 @@ Usage:
   orchbun run --agent AGENT --prompt TEXT [--task ID] [--mode review|work]
   orchbun delegate --agent AGENT --prompt TEXT [--mode review|work]
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
+  orchbun workspaces list|inspect|cleanup [--run ID] [--json]
+  orchbun runtime status|rebuild|logs
   orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
   orchbun memory sleep [--dry-run] [--json]
   orchbun memory sweep [--dry-run] [--json]
@@ -155,6 +158,40 @@ async function main(): Promise<void> {
   const config = await loadConfig(root);
   const orchestrator = new Orchestrator(root, config);
 
+  if (command === "runtime") {
+    if (!subcommand || !["status", "rebuild", "logs"].includes(subcommand)) {
+      throw new Error("Usage: orchbun runtime status|rebuild|logs");
+    }
+    const socketPath = process.env.ORCHBUN_RUNTIME_SOCKET;
+    const token = process.env.ORCHBUN_RUNTIME_TOKEN;
+    if (!socketPath || !token) throw new Error("runtime commands are available only inside a managed isolated work run");
+    const output = await requestRuntimeCommand(socketPath, token, subcommand as RuntimeCommand);
+    if (output) console.log(output);
+    return;
+  }
+
+  if (command === "workspaces") {
+    if (subcommand === "list") {
+      const leases = await orchestrator.isolation.list();
+      if (args.options.has("json")) console.log(JSON.stringify(leases, null, 2));
+      else for (const lease of leases) console.log(`${lease.leaseId}\t${lease.lifecycle}\t${lease.branch}\t${lease.workspaceRoot}`);
+      return;
+    }
+    const leaseId = option(args, "run");
+    if (!leaseId) throw new Error(`--run is required for workspaces ${subcommand}`);
+    if (subcommand === "inspect") {
+      const lease = await orchestrator.isolation.read(leaseId);
+      console.log(args.options.has("json") ? JSON.stringify(lease, null, 2) : `${lease.leaseId}\n${lease.lifecycle}\n${lease.branch}\n${lease.workspaceRoot}`);
+      return;
+    }
+    if (subcommand === "cleanup") {
+      const lease = await orchestrator.isolation.cleanup(leaseId);
+      console.log(args.options.has("json") ? JSON.stringify(lease, null, 2) : `${lease.leaseId} cleaned`);
+      return;
+    }
+    throw new Error("Usage: orchbun workspaces list|inspect|cleanup [--run ID] [--json]");
+  }
+
   if (command === "memory") {
     if (subcommand === "sleep") {
       const publish = !args.options.has("dry-run");
@@ -247,6 +284,7 @@ async function main(): Promise<void> {
   const depth = isDelegate ? Number(process.env.ORCHBUN_DEPTH ?? "0") + 1 : 0;
   const taskId = option(args, "task") ?? (isDelegate ? process.env.ORCHBUN_TASK_ID || null : null);
   const selectedMode = mode(args, isDelegate ? config.delegation.defaultMode : "review");
+  const delegatedIsolation = isDelegate ? inheritedIsolation(process.env) : undefined;
   const options: RunOptions = {
     agent: agent(args, config.agents.default),
     mode: selectedMode,
@@ -255,11 +293,12 @@ async function main(): Promise<void> {
     parentRunId,
     depth,
     contextFiles: contextFiles(args),
+    ...(delegatedIsolation ? { isolation: delegatedIsolation } : {}),
     ...(option(args, "model") ? { model: option(args, "model")! } : {}),
   };
 
   if (command === "context" || args.options.has("dry-run")) {
-    const packet = await orchestrator.context(options);
+    const packet = await orchestrator.context(options, options.isolation?.workspaceRoot);
     if (args.options.has("json")) console.log(JSON.stringify(packet, null, 2));
     else {
       console.log(packet.expandedPrompt);
@@ -278,6 +317,7 @@ async function main(): Promise<void> {
     deliverables: completed.result.deliverables,
     blockers: completed.result.blockers,
     next_actions: completed.result.next_actions,
+    isolation: completed.metadata.isolation ?? null,
   };
   if (isDelegate || args.options.has("json")) console.log(JSON.stringify(receipt));
   else {
@@ -303,6 +343,13 @@ function validateInvocation(args: ParsedArgs): void {
       sleep: ["root", "dry-run", "json"], sweep: ["root", "dry-run", "json"], web: ["root", "port"],
     };
     allowed = memoryOptions[subcommand] ?? [];
+  } else if (command === "workspaces" && subcommand) {
+    const workspaceOptions: Record<string, string[]> = {
+      list: ["root", "json"], inspect: ["root", "run", "json"], cleanup: ["root", "run", "json"],
+    };
+    allowed = workspaceOptions[subcommand] ?? [];
+  } else if (command === "runtime" && subcommand) {
+    allowed = [];
   } else throw new Error(`Unknown command.\n\n${HELP}`);
   for (const [name, value] of args.options) {
     if (!allowed.includes(name)) throw new Error(`--${name} is not supported for ${[command, subcommand].filter(Boolean).join(" ")}`);

@@ -52,6 +52,28 @@ export interface AgentUsage {
   costUsd?: number;
 }
 
+export interface RuntimeIsolation {
+  driver: "none" | "compose";
+  project: string | null;
+  frontendPort: number | null;
+  backendPort: number | null;
+  databasePort: number | null;
+  frontendUrl: string | null;
+  backendUrl: string | null;
+  state: "disabled" | "allocated" | "ready" | "stopped" | "failed";
+}
+
+export interface WorktreeIsolation {
+  leaseId: string;
+  inherited: boolean;
+  controlRoot: string;
+  workspaceRoot: string;
+  baseCommit: string;
+  branch: string;
+  lifecycle: "provisioned" | "running" | "retained" | "cleaned" | "recovery-required";
+  runtime: RuntimeIsolation;
+}
+
 export interface RunMetadata {
   runId: string;
   parentRunId: string | null;
@@ -71,4 +93,5 @@ export interface RunMetadata {
   gitBefore?: string;
   gitAfter?: string;
   usage?: AgentUsage;
+  isolation?: WorktreeIsolation;
 }

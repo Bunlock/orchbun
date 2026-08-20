@@ -12,6 +12,8 @@ import { rebuildMemory } from "./memory.js";
 import { completeRoadmapTask } from "./roadmap.js";
 import type { AgentKind, AgentResult, ContextPacket, RunMetadata, RunMode, RunStatus } from "./types.js";
 import { contentHash, newRunId } from "./utils.js";
+import { IsolationManager, RuntimeBroker } from "./isolation.js";
+import type { WorktreeIsolation } from "./types.js";
 
 export interface RunOptions {
   agent: AgentKind;
@@ -22,6 +24,7 @@ export interface RunOptions {
   depth: number;
   contextFiles: string[];
   model?: string;
+  isolation?: WorktreeIsolation;
 }
 
 export interface CompletedRun {
@@ -33,6 +36,7 @@ export interface CompletedRun {
 export class Orchestrator {
   private readonly adapters: Record<AgentKind, AgentAdapter>;
   readonly journal: RunJournal;
+  readonly isolation: IsolationManager;
 
   constructor(
     private readonly root: string,
@@ -40,6 +44,7 @@ export class Orchestrator {
     adapters: Partial<Record<AgentKind, AgentAdapter>> = {},
   ) {
     this.journal = new RunJournal(memoryRoot(root, config));
+    this.isolation = new IsolationManager(root, config);
     this.adapters = {
       codex: new CodexAdapter(),
       claude: new ClaudeAdapter(),
@@ -48,7 +53,11 @@ export class Orchestrator {
     };
   }
 
-  async context(options: RunOptions): Promise<ContextPacket> {
+  async context(
+    options: RunOptions,
+    workspaceRoot = this.root,
+    runtimeAvailable = options.isolation?.runtime.driver === "compose",
+  ): Promise<ContextPacket> {
     await this.journal.initialize();
     await rebuildMemory(this.journal, this.root);
     return buildContextPacket(this.root, this.config, {
@@ -57,7 +66,8 @@ export class Orchestrator {
       mode: options.mode,
       contextFiles: options.contextFiles,
       allowDelegation: options.mode === "work" && options.depth < this.config.delegation.maxDepth,
-    });
+      runtimeAvailable,
+    }, workspaceRoot);
   }
 
   async run(options: RunOptions): Promise<CompletedRun> {
@@ -69,9 +79,22 @@ export class Orchestrator {
       throw new Error("OpenRouter cannot use work mode because it has no local file tools");
     }
 
-    const packet = await this.context(options);
     const runId = newRunId(options.agent);
-    const before = await gitSnapshot(this.root);
+    const createsIsolation = !options.isolation && options.mode === "work" && this.config.isolation.enabled;
+    // Build and validate context before creating external resources. A fresh
+    // worktree is rooted at the same clean tracked HEAD, so the packet remains
+    // exact while avoiding orphaned worktrees for invalid context requests.
+    const preparedPacket = createsIsolation
+      ? await this.context(options, this.root, this.config.isolation.runtime.driver === "compose")
+      : undefined;
+    const isolation = options.isolation ?? (
+      createsIsolation
+        ? await this.isolation.provision(runId, options.taskId)
+        : undefined
+    );
+    const workspaceRoot = isolation?.workspaceRoot ?? this.root;
+    const packet = preparedPacket ?? await this.context({ ...options, ...(isolation ? { isolation } : {}) }, workspaceRoot);
+    const before = await gitSnapshot(workspaceRoot);
     const model = options.model ?? (options.agent === "openrouter" ? this.config.agents.openrouterModel : undefined);
     const metadata: RunMetadata = {
       runId,
@@ -90,6 +113,7 @@ export class Orchestrator {
       includedFiles: packet.includedFiles,
       omittedFiles: packet.omittedFiles,
       gitBefore: snapshotLabel(before),
+      ...(isolation ? { isolation } : {}),
     };
     const runDirectory = await this.journal.begin(metadata, packet);
 
@@ -100,11 +124,28 @@ export class Orchestrator {
       ORCHBUN_TASK_ID: options.taskId ?? "",
       ORCHBUN_DEPTH: String(options.depth),
       ORCHBUN_MODE: options.mode,
+      ...(isolation ? {
+        ...this.isolation.environment(isolation),
+        ORCHBUN_BASE_COMMIT: isolation.baseCommit,
+        ORCHBUN_RUNTIME_DRIVER: isolation.runtime.driver,
+        ORCHBUN_RUNTIME_STATE: isolation.runtime.state,
+        ORCHBUN_COMPOSE_PROJECT: isolation.runtime.project ?? "",
+      } : {}),
     };
+    let broker: RuntimeBroker | undefined;
 
     try {
+      if (isolation) await this.isolation.markRunning(isolation);
+      if (isolation?.runtime.driver === "compose" && isolation.runtime.state === "ready") {
+        broker = new RuntimeBroker(this.isolation, isolation);
+        const access = await broker.start();
+        environment.ORCHBUN_RUNTIME_SOCKET = access.socketPath;
+        environment.ORCHBUN_RUNTIME_TOKEN = access.token;
+        environment.DOCKER_HOST = "unix:///nonexistent/orchbun-managed-docker.sock";
+      }
       let response = await this.adapters[options.agent].execute(packet, {
-        root: this.root,
+        controlRoot: this.root,
+        root: workspaceRoot,
         temporaryDir: path.join(this.journal.memoryRoot, "tmp"),
         mode: options.mode,
         environment,
@@ -116,7 +157,7 @@ export class Orchestrator {
       }
 
       if (options.mode === "work" && response.result.outcome === "completed" && options.taskId) {
-        const roadmap = await completeRoadmapTask(this.root, options.taskId);
+        const roadmap = await completeRoadmapTask(workspaceRoot, options.taskId);
         if (roadmap === "updated" && response.result.files_changed.length < 30) {
           response = {
             ...response,
@@ -131,7 +172,7 @@ export class Orchestrator {
         }
       }
 
-      const after = await gitSnapshot(this.root);
+      const after = await gitSnapshot(workspaceRoot);
       if (options.mode === "review" && before.fingerprint !== after.fingerprint) {
         response = reviewViolation(response);
       }
@@ -140,13 +181,17 @@ export class Orchestrator {
       metadata.gitAfter = snapshotLabel(after);
       if (response.usage) metadata.usage = response.usage;
       if (response.model) metadata.model = response.model;
+      await broker?.stop();
+      if (isolation) await this.isolation.retain(isolation);
       await this.journal.complete(runDirectory, metadata, response);
       await rebuildMemory(this.journal, this.root);
       return { result: response.result, metadata, runDirectory };
     } catch (error) {
       metadata.status = "failed";
       metadata.finishedAt = new Date().toISOString();
-      metadata.gitAfter = snapshotLabel(await gitSnapshot(this.root));
+      metadata.gitAfter = snapshotLabel(await gitSnapshot(workspaceRoot));
+      try { await broker?.stop(); } catch { /* Preserve the original run failure. */ }
+      if (isolation) await this.isolation.retain(isolation, true);
       await this.journal.fail(runDirectory, metadata, error);
       await rebuildMemory(this.journal, this.root);
       throw error;

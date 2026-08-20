@@ -3,7 +3,7 @@ import path from "node:path";
 import YAML from "yaml";
 import type { AdapterResponse } from "./adapters/base.js";
 import { DIRECT_MEMORY_PROTOCOL } from "./direct-memory.js";
-import type { AgentResult, ContextPacket, RunMetadata } from "./types.js";
+import type { AgentResult, ContextPacket, RunMetadata, WorktreeIsolation } from "./types.js";
 
 const PROTOCOL = `# Agent memory protocol
 
@@ -172,6 +172,25 @@ function toSnakeCaseMetadata(metadata: RunMetadata): Record<string, unknown> {
     omitted_files: metadata.omittedFiles,
     ...(metadata.gitBefore ? { git_before: metadata.gitBefore } : {}),
     ...(metadata.gitAfter ? { git_after: metadata.gitAfter } : {}),
+    ...(metadata.isolation ? { isolation: {
+      lease_id: metadata.isolation.leaseId,
+      inherited: metadata.isolation.inherited,
+      control_root: metadata.isolation.controlRoot,
+      workspace_root: metadata.isolation.workspaceRoot,
+      base_commit: metadata.isolation.baseCommit,
+      branch: metadata.isolation.branch,
+      lifecycle: metadata.isolation.lifecycle,
+      runtime: {
+        driver: metadata.isolation.runtime.driver,
+        project: metadata.isolation.runtime.project,
+        frontend_port: metadata.isolation.runtime.frontendPort,
+        backend_port: metadata.isolation.runtime.backendPort,
+        database_port: metadata.isolation.runtime.databasePort,
+        frontend_url: metadata.isolation.runtime.frontendUrl,
+        backend_url: metadata.isolation.runtime.backendUrl,
+        state: metadata.isolation.runtime.state,
+      },
+    } } : {}),
     ...(metadata.usage ? { usage: {
       input_tokens: metadata.usage.inputTokens,
       output_tokens: metadata.usage.outputTokens,
@@ -183,6 +202,8 @@ function toSnakeCaseMetadata(metadata: RunMetadata): Record<string, unknown> {
 
 export function metadataFromYaml(value: Record<string, unknown>): RunMetadata {
   const usage = value.usage as Record<string, number | undefined> | undefined;
+  const isolation = value.isolation as Record<string, unknown> | undefined;
+  const runtime = isolation?.runtime as Record<string, unknown> | undefined;
   return {
     runId: String(value.run_id),
     parentRunId: value.parent_run_id ? String(value.parent_run_id) : null,
@@ -207,7 +228,30 @@ export function metadataFromYaml(value: Record<string, unknown>): RunMetadata {
       ...(usage.cached_input_tokens !== undefined ? { cachedInputTokens: usage.cached_input_tokens } : {}),
       ...(usage.cost_usd !== undefined ? { costUsd: usage.cost_usd } : {}),
     } } : {}),
+    ...(isolation && runtime ? { isolation: {
+      leaseId: String(isolation.lease_id),
+      inherited: Boolean(isolation.inherited),
+      controlRoot: String(isolation.control_root),
+      workspaceRoot: String(isolation.workspace_root),
+      baseCommit: String(isolation.base_commit),
+      branch: String(isolation.branch),
+      lifecycle: String(isolation.lifecycle) as WorktreeIsolation["lifecycle"],
+      runtime: {
+        driver: String(runtime.driver) as "none" | "compose",
+        project: runtime.project === null || runtime.project === undefined ? null : String(runtime.project),
+        frontendPort: nullableNumber(runtime.frontend_port),
+        backendPort: nullableNumber(runtime.backend_port),
+        databasePort: nullableNumber(runtime.database_port),
+        frontendUrl: runtime.frontend_url === null || runtime.frontend_url === undefined ? null : String(runtime.frontend_url),
+        backendUrl: runtime.backend_url === null || runtime.backend_url === undefined ? null : String(runtime.backend_url),
+        state: String(runtime.state) as "disabled" | "allocated" | "ready" | "stopped" | "failed",
+      },
+    } } : {}),
   };
+}
+
+function nullableNumber(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
 }
 
 function renderSummary(metadata: RunMetadata, result: AgentResult): string {
