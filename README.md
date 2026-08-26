@@ -2,9 +2,9 @@
 
 # OrchBun
 
-OrchBun is a local-first agent manager for solo developers. It runs Codex, Claude Code, and OpenRouter agents with bounded context, records auditable results, maintains compact project memory, and provides a small local web workspace for day-to-day memory and roadmap work.
+OrchBun is a local-first agent manager for solo developers. It runs Codex, Claude Code, and OpenRouter agents with bounded context, records auditable results, maintains compact project memory, and provides a small local web workspace for everyday memory and roadmap work.
 
-The memory server binds to `127.0.0.1`. Project memory stays in the project, is ignored by Git by default, and is never uploaded by OrchBun itself.
+The memory server binds to `127.0.0.1`. Project memory remains in the project, is ignored by Git by default, and is never uploaded by OrchBun itself.
 
 ## What 1.0 includes
 
@@ -73,6 +73,14 @@ Each memory page supports Preview, Raw, Edit, and Save. Saved memory pages becom
 The Project files page opens and edits project-relative Markdown paths. `ROADMAP.md` and `AGENTS.md` are the defaults. Absolute paths, non-Markdown files, and paths outside the project are rejected.
 
 Roadmap checkboxes are validation gates. A milestone can be approved only when all of its steps are checked and `memory verify` passes. Approval creates a schema-valid local manifest under `memory/agents/milestones/<milestone>/approved.yaml`; compaction remains a separate, explicit publish action.
+
+### Roadmap format
+
+A milestone is a level 2 to 4 heading of the form `<ID> — <Title>`, with an optional `Phase ` prefix: `## A — Foundation`, `### Phase E0 — Environment contract`. Headings without that shape are ordinary prose and leave the current milestone in place. A step is `- [ ] **<TASK-ID>** <title>`, continued on indented lines; checklist lines without a bold task ID are ignored by every gate.
+
+`active-tasks.md` leads with the first incomplete milestone, then lists the remaining open steps under `## Scheduled`, so no known roadmap work is hidden while the current milestone stays in front.
+
+`memory rebuild` also projects ad-hoc work back into the roadmap. Direct notes whose task and next actions name no roadmap step are written as a plain checklist between `<!-- orchbun:phase-p:start -->` and `<!-- orchbun:phase-p:end -->` under `## Phase P — Product work tracked in direct notes`, appended once if those markers are absent. Entries are unchecked while their note is active and checked once it is retired or superseded. Everything outside the markers is left byte for byte; the generated lines carry no task ID, so they never gate a milestone approval. A project with no ad-hoc notes and no markers is not touched.
 
 ### Severity, urgency, and priority
 

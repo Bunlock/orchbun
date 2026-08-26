@@ -98,7 +98,7 @@ export async function sleepMemory(
       roadmapPath: snapshot.roadmap.path,
     };
     await writeFile(path.join(sleepRoot, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
-    await writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), renderActiveTasks(snapshot.activeTasks));
+    await writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), renderActiveTasks(snapshot.activeTasks, snapshot.scheduledTasks));
     return {
       snapshot,
       published: true,
@@ -143,14 +143,17 @@ export async function verifySleep(memoryRoot: string): Promise<string[]> {
 
 export async function reconciledActiveTasks(root: string, journal: RunJournal): Promise<string | undefined> {
   if (!(await sleepIsEnabled(journal.memoryRoot))) return undefined;
-  return renderActiveTasks((await buildSleepSnapshot(root, journal)).activeTasks);
+  const snapshot = await buildSleepSnapshot(root, journal);
+  return renderActiveTasks(snapshot.activeTasks, snapshot.scheduledTasks);
 }
 
-export function renderActiveTasks(tasks: SleepTask[]): string {
-  const lines = tasks.map((task) =>
-    `- **${task.taskId} · ${task.milestoneTitle}:** ${task.nextAction}`,
-  );
-  return `# Active tasks\n\n${lines.join("\n") || "No active roadmap tasks recorded."}\n`;
+/** The active milestone leads; remaining open roadmap work follows so no known task is hidden. */
+export function renderActiveTasks(tasks: SleepTask[], scheduled: SleepTask[] = []): string {
+  const list = (items: SleepTask[]): string => items
+    .map((task) => `- **${task.taskId} · ${task.milestoneTitle}:** ${task.nextAction}`)
+    .join("\n");
+  const active = list(tasks) || "No active roadmap tasks recorded.";
+  return `# Active tasks\n\n${active}\n${scheduled.length ? `\n## Scheduled\n\n${list(scheduled)}\n` : ""}`;
 }
 
 async function buildSleepSnapshot(root: string, journal: RunJournal): Promise<SleepSnapshot> {
@@ -313,7 +316,8 @@ function buildSubjects(notes: DirectMemoryNote[], includedIds: Set<string>, road
   });
 }
 
-function roadmapReferences(text: string, roadmap: RoadmapState): string[] {
+/** Stable task-id resolution shared by Sleep and the roadmap projection. */
+export function roadmapReferences(text: string, roadmap: RoadmapState): string[] {
   const exact = new Set(text.match(TASK_ID) ?? []);
   const output: string[] = [];
   for (const task of roadmap.tasks) {

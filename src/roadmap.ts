@@ -21,7 +21,7 @@ export interface RoadmapState {
 }
 
 const TASK_LINE = /^\s*-\s+\[([ xX])\]\s+\*\*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\*\*\s*(.*)$/;
-const MILESTONE_LINE = /^##\s+([A-Z0-9]+)\s+[—-]\s+(.+)$/;
+const MILESTONE_LINE = /^#{2,4}\s+(?:Phase\s+)?([A-Z0-9]+)\s+[—-]\s+(.+)$/;
 
 export async function loadRoadmap(root: string, relativePath = "ROADMAP.md"): Promise<RoadmapState> {
   const roadmapPath = projectMarkdownPath(root, relativePath);
@@ -101,7 +101,7 @@ export async function setRoadmapTaskCompletion(
   return "updated";
 }
 
-function projectMarkdownPath(root: string, relativePath: string): string {
+export function projectMarkdownPath(root: string, relativePath: string): string {
   if (!relativePath || path.isAbsolute(relativePath) || path.extname(relativePath).toLowerCase() !== ".md") {
     throw new Error("Roadmap path must be a project-relative .md file");
   }

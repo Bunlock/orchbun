@@ -174,6 +174,11 @@ export async function rebuildMemoryUnlocked(journal: RunJournal, projectRoot?: s
     writeFile(path.join(journal.memoryRoot, "working", "risks.md"), `${provenance}# Risks and blockers\n\n${risks.map((item) => `- ${item}`).join("\n") || "No risks recorded."}\n`),
     writeFile(path.join(journal.memoryRoot, "index.md"), `# Agent runs\n\n${links.join("\n") || "No runs recorded."}\n`),
   ]);
+  if (projectRoot) {
+    // Dynamic, like reconciledActiveTasks above: the projection reaches sleep-memory, which imports
+    // this module for run loading.
+    await import("./roadmap-projection.js").then(({ syncRoadmapProjection }) => syncRoadmapProjection(projectRoot, direct.notes));
+  }
   await applyMemoryOverrides(journal.memoryRoot);
 }
 

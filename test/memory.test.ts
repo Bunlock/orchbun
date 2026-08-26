@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { RunJournal } from "../src/journal.js";
-import { resolveDirectMemory, type DirectMemoryNote } from "../src/direct-memory.js";
+import { loadDirectMemory, resolveDirectMemory, type DirectMemoryNote } from "../src/direct-memory.js";
 import { rebuildMemory, verifyMemory } from "../src/memory.js";
 import { compactMemory } from "../src/milestone-memory.js";
 import { sweepMemory } from "../src/memory-sweep.js";
@@ -330,4 +330,30 @@ supersedes: []
 
   await assert.rejects(() => compactMemory(journal, manifest, "review-pending", "shared"), /schema validation/);
   assert.equal(await readFile(path.join(root, "working", "project-state.md"), "utf8"), before);
+});
+
+test("a lifecycle marker can be added to a note that never recorded its agent", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-lifecycle-"));
+  const memoryRoot = path.join(root, "memory", "agents");
+  const directory = path.join(memoryRoot, "direct", "2026", "08");
+  await mkdir(directory, { recursive: true });
+  const body = (extra: string) => `# Note
+
+- **Task:** Ship the thing.
+- **Outcome:** Shipped.
+- **Decisions:** None
+- **Risks or blockers:** None
+- **Next actions:** None
+- **Changed files:** None
+- **Verification:** Reviewed.
+${extra}`;
+
+  await writeFile(path.join(directory, "20260810T120000Z-retired-no-agent.md"), body(`- **Status:** retired\n- **Reason:** Delivered.\n`));
+  await writeFile(path.join(directory, "20260810T120100Z-provenance-half.md"), body(`- **Recorded at:** 2026-08-10T12:01:00Z\n`));
+
+  const loaded = await loadDirectMemory(memoryRoot);
+  assert.deepEqual(loaded.notes.map((note) => note.status), ["retired"]);
+  assert.deepEqual(loaded.issues, [
+    "direct/2026/08/20260810T120100Z-provenance-half.md: Agent must not be empty when provenance fields are used",
+  ]);
 });

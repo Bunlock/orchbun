@@ -63,7 +63,7 @@ test("roadmap parsing preserves order, lifecycle, and multiline task titles", as
   assert.equal(parsed.tasks[1]?.title, "Make the board usable on a phone.");
 });
 
-test("sleep publishes only the first incomplete milestone and rebuild keeps it reconciled", async () => {
+test("sleep leads with the first incomplete milestone, schedules the rest, and rebuild keeps it reconciled", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-sleep-"));
   const memoryRoot = path.join(root, "memory", "agents");
   const journal = new RunJournal(memoryRoot);
@@ -104,13 +104,16 @@ test("sleep publishes only the first incomplete milestone and rebuild keeps it r
   const active = await readFile(path.join(memoryRoot, "working", "active-tasks.md"), "utf8");
   assert.match(active, /HEX-B1 · Playable/);
   assert.match(active, /HEX-B2 · Playable/);
-  assert.doesNotMatch(active, /HEX-A1|HEX-C1|deployment/i);
+  assert.match(active, /## Scheduled\n\n- \*\*HEX-C1 · Campaign:\*\* Start HEX-C1 now\./);
+  assert.doesNotMatch(active, /HEX-A1|deployment/i);
+  assert.ok(active.indexOf("HEX-B2") < active.indexOf("## Scheduled"));
 
   await directNote(memoryRoot, "20260810T120500Z", "latest-board", "HEX-B1 board", "Ship the final HEX-B1 change.", "- **Subjects:** memory/board\n- **Supersedes:** 20260810T120200Z-new-board");
   await rebuildMemory(journal, root);
   const rebuilt = await readFile(path.join(memoryRoot, "working", "active-tasks.md"), "utf8");
   assert.match(rebuilt, /Ship the final HEX-B1 change/);
-  assert.doesNotMatch(rebuilt, /HEX-A1|HEX-C1|deployment/i);
+  assert.match(rebuilt, /## Scheduled\n\n- \*\*HEX-C1 · Campaign:\*\*/);
+  assert.doesNotMatch(rebuilt, /HEX-A1|deployment/i);
 
   const repeated = await sleepMemory(root, journal, { publish: true });
   assert.notEqual(repeated.snapshot.snapshotId, published.snapshot.snapshotId);

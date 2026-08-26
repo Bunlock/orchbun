@@ -8,7 +8,7 @@ This directory stores compact memory notes from agents prompted outside Orchbun.
 - Create one immutable Markdown note per task under \`YYYY/MM/\`.
 - Name notes \`<UTC timestamp>-<task-slug>.md\`, for example \`20260810T143000Z-review-auth-flow.md\`.
 - Record \`Agent\`, \`Recorded at\`, task, outcome, decisions, risks or blockers, next actions, changed files, verification, and \`Status\`.
-- \`Recorded at\` must match the UTC timestamp in the filename. \`Status\` is \`active\` unless explicitly set to \`retired\` or \`superseded\`; retired notes also need a \`Reason\`.
+- \`Recorded at\` must match the UTC timestamp in the filename, and pairs with \`Agent\`: a note declaring either must carry both. \`Status\` is \`active\` unless explicitly set to \`retired\` or \`superseded\`; retired notes also need a \`Reason\`. Lifecycle markers stay addable to an older note that never recorded its agent.
 - Optionally add \`Supersedes\` with one or more earlier note IDs to retire their current decisions, risks, and next actions without deleting history.
 - Optionally add \`Subjects\` with stable keys such as \`memory/sleep\` to support deterministic, non-semantic grouping.
 - Keep notes factual and compact. Do not place raw transcripts or secrets here.
@@ -90,18 +90,20 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
     if (!parsed.values.outcome[0]?.trim()) issues.push(`${relativePath}: Outcome must not be empty`);
     if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim()) continue;
 
-    const hasLifecycleFields = ["agent", "recorded at", "status", "reason"].some((label) => parsed.present.has(label));
+    // Provenance is demanded only by the provenance fields themselves. Status and Reason are
+    // lifecycle markers that must stay addable to an older note whose original agent is unrecoverable.
+    const hasProvenanceFields = ["agent", "recorded at"].some((label) => parsed.present.has(label));
     const agent = parsed.values.agent[0]?.trim();
     const recordedAt = parsed.values.recordedAt[0]?.trim();
     const rawStatus = parsed.values.status[0]?.trim().toLowerCase();
     const status = rawStatus || "active";
-    if (hasLifecycleFields && !agent) issues.push(`${relativePath}: Agent must not be empty when lifecycle fields are used`);
-    if (hasLifecycleFields && !recordedAt) issues.push(`${relativePath}: Recorded at is required when lifecycle fields are used`);
+    if (hasProvenanceFields && !agent) issues.push(`${relativePath}: Agent must not be empty when provenance fields are used`);
+    if (hasProvenanceFields && !recordedAt) issues.push(`${relativePath}: Recorded at is required when provenance fields are used`);
     if (recordedAt && recordedAt !== timestamp) issues.push(`${relativePath}: Recorded at must match filename timestamp ${timestamp}`);
     if (!["active", "retired", "superseded"].includes(status)) issues.push(`${relativePath}: Status must be active, retired, or superseded`);
     const reason = parsed.values.reason[0]?.trim();
     if (status === "retired" && !reason) issues.push(`${relativePath}: Reason is required when Status is retired`);
-    if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim() || (hasLifecycleFields && (!agent || !recordedAt)) || (recordedAt && recordedAt !== timestamp) || !["active", "retired", "superseded"].includes(status) || (status === "retired" && !reason)) continue;
+    if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim() || (hasProvenanceFields && (!agent || !recordedAt)) || (recordedAt && recordedAt !== timestamp) || !["active", "retired", "superseded"].includes(status) || (status === "retired" && !reason)) continue;
 
     notes.push({
       id: fileName.slice(0, -3),
