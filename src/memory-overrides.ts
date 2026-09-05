@@ -25,17 +25,37 @@ export async function saveMemoryOverride(memoryRoot: string, id: string, markdow
     throw new Error("Memory page is larger than 250 KB");
   }
   const manual = path.join(memoryRoot, "manual", filename);
-  const working = path.join(memoryRoot, "working", filename);
-  await Promise.all([mkdir(path.dirname(manual), { recursive: true }), mkdir(path.dirname(working), { recursive: true })]);
+  await mkdir(path.dirname(manual), { recursive: true });
   await atomicWrite(manual, normalize(markdown));
-  await atomicWrite(working, normalize(markdown));
+}
+
+const ANNOTATION_START = "<!-- orchbun:annotation:start -->";
+
+/** Legacy full-page overrides remain intact on disk and become visible annotations. */
+export function withMemoryAnnotation(generated: string, annotation: string): string {
+  const content = generated.split(ANNOTATION_START)[0]!.trimEnd();
+  return annotation.trim()
+    ? `${content}\n\n${ANNOTATION_START}\n## Human annotations\n\nThese notes are preserved as written. Current task and risk status comes from the generated sections above.\n\n${annotation.trimEnd()}\n`
+    : `${content}\n`;
+}
+
+export async function readMemoryAnnotations(memoryRoot: string): Promise<Record<MemoryPageId, string>> {
+  const entries = await Promise.all(MEMORY_PAGE_DEFINITIONS.map(async ([id, , filename]) => {
+    try { return [id, await readFile(path.join(memoryRoot, "manual", filename), "utf8")] as const; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return [id, ""] as const;
+    }
+  }));
+  return Object.fromEntries(entries) as Record<MemoryPageId, string>;
 }
 
 export async function applyMemoryOverrides(memoryRoot: string): Promise<void> {
-  await Promise.all(MEMORY_PAGE_DEFINITIONS.map(async ([, , filename]) => {
+  await Promise.all(MEMORY_PAGE_DEFINITIONS.map(async ([id, , filename]) => {
     try {
       const markdown = await readFile(path.join(memoryRoot, "manual", filename), "utf8");
-      await atomicWrite(path.join(memoryRoot, "working", filename), markdown);
+      const generated = await readMemoryPage(memoryRoot, id);
+      await atomicWrite(path.join(memoryRoot, "working", filename), withMemoryAnnotation(generated, markdown));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }

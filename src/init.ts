@@ -3,7 +3,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { CONFIG_FILE, DEFAULT_CONFIG, pathExists } from "./config.js";
 import { RunJournal } from "./journal.js";
-import { rebuildMemory } from "./memory.js";
+import { refreshMemory } from "./memory-refresh.js";
 
 export interface InitReceipt {
   root: string;
@@ -30,14 +30,15 @@ export async function initializeWorkspace(root: string): Promise<InitReceipt> {
 - Read the generated working memory under \`memory/agents/working/\` before project work.
 - Record durable direct-agent outcomes under \`memory/agents/direct/YYYY/MM/\`.
 - Keep \`memory/\` local and ignored by Git; keep \`ROADMAP.md\` and this file versioned.
-- Do not edit generated working files directly from the filesystem. Use OrchBun memory web for persistent manual overrides.
-- Run \`orchbun memory rebuild\` and \`orchbun memory verify\` after recording memory.
+- Do not edit generated working files directly from the filesystem. Use OrchBun memory web for persistent human annotations.
+- Use \`orchbun memory record --file outcome.md\` to validate, record, and refresh a direct outcome. Use \`orchbun memory refresh --dry-run\` for a read-only current view.
+- Run \`orchbun memory verify\` after recording memory. Explicit \`memory rebuild\` additionally maintains the roadmap projection and runs its configured hook.
 - Mark only completed, verified roadmap steps as done. Approve a milestone manifest only after every step passes.
 `, created, "AGENTS.md");
   const memoryRoot = path.join(resolved, DEFAULT_CONFIG.memoryDir);
   const journal = new RunJournal(memoryRoot);
   await journal.initialize();
-  await rebuildMemory(journal, resolved);
+  await refreshMemory(journal, resolved);
   return { root: resolved, created, memoryRoot };
 }
 

@@ -18,6 +18,7 @@ import {
   parseRiskItems,
   readProjectMarkdown,
   saveQualification,
+  validateQualification,
   saveWebSettings,
   writeProjectMarkdown,
   type Qualification,
@@ -26,6 +27,7 @@ import {
   type WebSettings,
   type WorkStatus,
 } from "./memory-workspace.js";
+import { MemoryConflict, readRefreshedMemory, refreshMemory, updateMemory, type RefreshedMemory } from "./memory-refresh.js";
 import { memoryViewerHtml } from "./memory-web-ui.js";
 
 export { memoryViewerHtml, renderMemoryMarkdown } from "./memory-web-ui.js";
@@ -34,11 +36,15 @@ export interface MemoryPage {
   id: string;
   title: string;
   markdown: string;
+  annotation: string;
 }
 
 export interface MemorySnapshot {
   projectName: string;
-  updatedAt: string;
+  updatedAt: string | null;
+  revision: string | null;
+  freshness: { status: "current" | "updates-pending" | "refresh-failed"; error?: string; changedPages: string[] };
+  lastVerification: RefreshedMemory["projection"]["lastVerification"];
   pages: MemoryPage[];
   settings: WebSettings;
   roadmap: Awaited<ReturnType<typeof loadRoadmapSafely>>;
@@ -52,21 +58,30 @@ export interface MemoryViewerOptions {
   projectRoot?: string;
 }
 
-export async function loadMemorySnapshot(memoryRoot: string, projectRoot = memoryRoot): Promise<MemorySnapshot> {
-  const settings = await loadWebSettings(memoryRoot);
-  const pages = await Promise.all(MEMORY_PAGE_DEFINITIONS.map(async ([id, title]) => ({
-    id,
-    title,
-    markdown: await readMemoryPage(memoryRoot, id),
-  })));
+export async function loadMemorySnapshot(memoryRoot: string, projectRoot?: string): Promise<MemorySnapshot> {
+  if (!projectRoot) {
+    const settings = await loadWebSettings(memoryRoot);
+    const pages = await Promise.all(MEMORY_PAGE_DEFINITIONS.map(async ([id, title]) => ({ id, title, markdown: await readMemoryPage(memoryRoot, id), annotation: "" })));
+    return { projectName: await deriveProjectName(memoryRoot), updatedAt: null, revision: null,
+      freshness: { status: "updates-pending", changedPages: [] }, lastVerification: null,
+      pages, settings, roadmap: null, qualifications: await loadQualifications(memoryRoot), risks: parseRiskItems(pages.find(page => page.id === "risks")?.markdown ?? "") };
+  }
+  let state: RefreshedMemory;
+  let error: string | undefined;
+  try { state = await refreshMemory(new RunJournal(memoryRoot), projectRoot); }
+  catch (failure) {
+    const previous = await readRefreshedMemory(memoryRoot);
+    if (!previous) throw failure;
+    state = previous;
+    error = failure instanceof Error ? failure.message : String(failure);
+  }
+  const { projection } = state;
   return {
-    projectName: await deriveProjectName(projectRoot),
-    updatedAt: new Date().toISOString(),
-    pages,
-    settings,
-    roadmap: await loadRoadmapSafely(projectRoot, settings.roadmapPath),
-    qualifications: await loadQualifications(memoryRoot),
-    risks: parseRiskItems(pages.find((page) => page.id === "risks")?.markdown ?? ""),
+    projectName: await deriveProjectName(projectRoot), updatedAt: state.refreshedAt, revision: state.revision,
+    freshness: { status: error ? "refresh-failed" : "current", changedPages: state.changedPages, ...(error ? { error } : {}) },
+    lastVerification: projection.lastVerification,
+    pages: MEMORY_PAGE_DEFINITIONS.map(([id, title]) => ({ id, title, markdown: projection.pages[id], annotation: projection.annotations[id] })),
+    settings: projection.settings, roadmap: projection.roadmap, qualifications: projection.qualifications, risks: projection.risks,
   };
 }
 
@@ -76,7 +91,7 @@ export async function runMemoryAction(action: MemoryAction, journal: RunJournal,
     return "Working memory rebuilt.";
   }
   if (action === "verify") {
-    const report = await verifyMemory(journal);
+    const report = await verifyMemory(journal, projectRoot);
     return report.issues.length ? `Verification found ${report.issues.length} issue(s):\n${report.issues.map((issue) => `- ${issue}`).join("\n")}` : "Verification passed.";
   }
   if (action === "sleep-preview" || action === "sleep-publish") {
@@ -89,7 +104,7 @@ export async function runMemoryAction(action: MemoryAction, journal: RunJournal,
   }
   if (action === "compact-all") {
     const receipt = await compactAllApprovedMilestones(journal, "shared");
-    await rebuildMemory(journal, projectRoot);
+    await refreshMemory(journal, projectRoot);
     return `Compacted ${receipt.compacted.length} milestone(s); skipped ${receipt.skipped} already published.`;
   }
   throw new Error("Unknown memory action");
@@ -119,50 +134,47 @@ export function createMemoryServer(memoryRoot: string, options: MemoryViewerOpti
         if (!isMemoryAction(body.action)) throw new Error("Unknown memory action");
         return json(response, 200, { message: await runMemoryAction(body.action, journal, projectRoot) });
       }
-      if (request.method === "POST" && url.pathname === "/api/memory/pages") {
-        const body = await readJson(request);
-        if (typeof body.id !== "string" || typeof body.markdown !== "string") throw new Error("Memory page id and Markdown are required");
-        await saveMemoryOverride(memoryRoot, body.id, body.markdown);
-        return json(response, 200, { message: "Memory page saved as a persistent local override." });
-      }
-      if (request.method === "POST" && url.pathname === "/api/project-file") {
+      if (request.method === "POST" && ["/api/memory/pages", "/api/project-file", "/api/qualifications", "/api/roadmap/tasks", "/api/milestones/approve"].includes(url.pathname)) {
         requireProjectRoot(projectRoot);
         const body = await readJson(request);
-        if (typeof body.path !== "string" || typeof body.markdown !== "string") throw new Error("Project-relative path and Markdown are required");
-        await writeProjectMarkdown(projectRoot, body.path, body.markdown);
-        if (body.kind === "roadmap" || body.kind === "agents") {
-          const settings = await loadWebSettings(memoryRoot);
-          await saveWebSettings(memoryRoot, { ...settings, [body.kind === "roadmap" ? "roadmapPath" : "agentsPath"]: body.path });
-        }
-        return json(response, 200, { message: `${body.path} saved.` });
-      }
-      if (request.method === "POST" && url.pathname === "/api/qualifications") {
-        const body = await readJson(request);
-        const qualification = await saveQualification(memoryRoot, {
-          kind: stringValue(body.kind) as "task" | "risk",
-          id: stringValue(body.id),
-          severity: stringValue(body.severity) as Severity,
-          urgency: stringValue(body.urgency) as Urgency,
-          status: stringValue(body.status) as WorkStatus,
+        const result = await updateMemory(journal, projectRoot, stringValue(body.revision), async projection => {
+          if (url.pathname === "/api/memory/pages") {
+            if (typeof body.id !== "string" || typeof body.markdown !== "string") throw new Error("Memory page id and Markdown are required");
+            await saveMemoryOverride(memoryRoot, body.id, body.markdown);
+            return { message: "Human annotations saved; generated project state refreshed." };
+          }
+          if (url.pathname === "/api/project-file") {
+            if (typeof body.path !== "string" || typeof body.markdown !== "string") throw new Error("Project-relative path and Markdown are required");
+            await writeProjectMarkdown(projectRoot, body.path, body.markdown);
+            if (body.kind === "roadmap" || body.kind === "agents") {
+              await saveWebSettings(memoryRoot, { ...projection.settings, [body.kind === "roadmap" ? "roadmapPath" : "agentsPath"]: body.path });
+            }
+            return { message: `${body.path} saved; project state refreshed.` };
+          }
+          if (url.pathname === "/api/qualifications") {
+            const value = validateQualification({ kind: stringValue(body.kind) as "task" | "risk", id: stringValue(body.id), severity: stringValue(body.severity) as Severity, urgency: stringValue(body.urgency) as Urgency, status: stringValue(body.status) as WorkStatus });
+            if (value.kind === "task") {
+              if (!projection.roadmap?.tasks.some(task => task.id === value.id)) throw new Error("Roadmap task was not found");
+              const original = await readProjectMarkdown(projectRoot, projection.settings.roadmapPath);
+              await setRoadmapTaskCompletion(projectRoot, value.id, value.status === "done", projection.settings.roadmapPath);
+              try { await saveQualification(memoryRoot, value); }
+              catch (error) { await writeProjectMarkdown(projectRoot, projection.settings.roadmapPath, original); throw error; }
+            } else {
+              if (!projection.risks.some(risk => risk.id === value.id)) throw new Error("Risk was not found");
+              await saveQualification(memoryRoot, value);
+            }
+            return { message: "Status and priority saved; project state refreshed." };
+          }
+          if (url.pathname === "/api/roadmap/tasks") {
+            if (typeof body.completed !== "boolean") throw new Error("completed must be a boolean");
+            const update = await setRoadmapTaskCompletion(projectRoot, stringValue(body.taskId), body.completed, projection.settings.roadmapPath);
+            if (update === "not-found" || update === "missing") throw new Error("Roadmap task was not found");
+            return { message: "Roadmap step updated; project state refreshed." };
+          }
+          const receipt = await approveMilestone(projectRoot, journal, projection.settings.roadmapPath, stringValue(body.milestone));
+          return { message: receipt.alreadyApproved ? `Milestone already approved at ${receipt.manifestPath}.` : `Milestone approved at ${receipt.manifestPath}.` };
         });
-        return json(response, 200, { qualification });
-      }
-      if (request.method === "POST" && url.pathname === "/api/roadmap/tasks") {
-        requireProjectRoot(projectRoot);
-        const body = await readJson(request);
-        const settings = await loadWebSettings(memoryRoot);
-        const update = await setRoadmapTaskCompletion(projectRoot, stringValue(body.taskId), Boolean(body.completed), settings.roadmapPath);
-        if (update === "not-found" || update === "missing") throw new Error("Roadmap task was not found");
-        return json(response, 200, { message: update === "updated" ? "Roadmap step updated." : "Roadmap step already matched." });
-      }
-      if (request.method === "POST" && url.pathname === "/api/milestones/approve") {
-        requireProjectRoot(projectRoot);
-        const body = await readJson(request);
-        const settings = await loadWebSettings(memoryRoot);
-        const receipt = await approveMilestone(projectRoot, journal, settings.roadmapPath, stringValue(body.milestone));
-        return json(response, 200, {
-          message: receipt.alreadyApproved ? `Milestone already approved at ${receipt.manifestPath}.` : `Milestone approved at ${receipt.manifestPath}.`,
-        });
+        return json(response, 200, { ...result.value, revision: result.memory.revision });
       }
       if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
         response.writeHead(200, securityHeaders({ "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" })).end(memoryViewerHtml());
@@ -176,7 +188,7 @@ export function createMemoryServer(memoryRoot: string, options: MemoryViewerOpti
       if (url.pathname.startsWith("/api/")) return json(response, 404, { error: "Not found" });
       response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
     } catch (error) {
-      json(response, 400, { error: error instanceof Error ? error.message : "Request failed" });
+      json(response, error instanceof MemoryConflict ? 409 : 400, { error: error instanceof Error ? error.message : "Request failed" });
     }
   });
 }

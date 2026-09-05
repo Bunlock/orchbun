@@ -8,7 +8,7 @@ import { OpenRouterAdapter } from "./adapters/openrouter.js";
 import type { AgentAdapter, AdapterResponse } from "./adapters/base.js";
 import { gitSnapshot, snapshotLabel } from "./git.js";
 import { RunJournal } from "./journal.js";
-import { rebuildMemory } from "./memory.js";
+import { refreshMemory } from "./memory-refresh.js";
 import { completeRoadmapTask } from "./roadmap.js";
 import type { AgentKind, AgentResult, ContextPacket, RunMetadata, RunMode, RunStatus } from "./types.js";
 import { contentHash, newRunId } from "./utils.js";
@@ -58,9 +58,9 @@ export class Orchestrator {
     workspaceRoot = this.root,
     runtimeAvailable = options.isolation?.runtime.driver === "compose",
   ): Promise<ContextPacket> {
-    await this.journal.initialize();
-    await rebuildMemory(this.journal, this.root);
+    const memory = await refreshMemory(this.journal, this.root, false);
     return buildContextPacket(this.root, this.config, {
+      memoryPages: memory.projection.pages,
       sourcePrompt: options.sourcePrompt,
       taskId: options.taskId,
       mode: options.mode,
@@ -79,6 +79,7 @@ export class Orchestrator {
       throw new Error("OpenRouter cannot use work mode because it has no local file tools");
     }
 
+    await this.journal.initialize();
     const runId = newRunId(options.agent);
     const createsIsolation = !options.isolation && options.mode === "work" && this.config.isolation.enabled;
     // Build and validate context before creating external resources. A fresh
@@ -133,6 +134,7 @@ export class Orchestrator {
       } : {}),
     };
     let broker: RuntimeBroker | undefined;
+    let resultRecorded = false;
 
     try {
       if (isolation) await this.isolation.markRunning(isolation);
@@ -184,16 +186,18 @@ export class Orchestrator {
       await broker?.stop();
       if (isolation) await this.isolation.retain(isolation);
       await this.journal.complete(runDirectory, metadata, response);
-      await rebuildMemory(this.journal, this.root);
+      resultRecorded = true;
+      await refreshMemory(this.journal, this.root);
       return { result: response.result, metadata, runDirectory };
     } catch (error) {
+      if (resultRecorded) throw new Error(`Run ${runId} is recorded, but project-state refresh failed: ${error instanceof Error ? error.message : String(error)}`);
       metadata.status = "failed";
       metadata.finishedAt = new Date().toISOString();
       metadata.gitAfter = snapshotLabel(await gitSnapshot(workspaceRoot));
       try { await broker?.stop(); } catch { /* Preserve the original run failure. */ }
       if (isolation) await this.isolation.retain(isolation, true);
       await this.journal.fail(runDirectory, metadata, error);
-      await rebuildMemory(this.journal, this.root);
+      await refreshMemory(this.journal, this.root);
       throw error;
     }
   }

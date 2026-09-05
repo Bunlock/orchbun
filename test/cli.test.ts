@@ -45,6 +45,31 @@ test("CLI maintenance operations and dry-run agent context have useful outputs",
   assert.match(dryRun.expandedPrompt, /Review safely/);
 });
 
+test("CLI records an immutable outcome and refreshes its current view", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-record-"));
+  await runCli("init", "--root", root);
+  const file = path.join(root, "outcome.md");
+  await writeFile(file, `# Outcome
+- **Recorded at:** 2026-09-05T12:00:00Z
+- **Task:** Refresh integration
+- **Outcome:** Recorded through the CLI.
+- **Decisions:** Keep current state local.
+- **Risks or blockers:** None
+- **Next actions:** None
+- **Changed files:** None
+- **Verification:** CLI integration test.
+- **Work status:** completed
+`);
+  const first = JSON.parse((await runCli("memory", "record", "--file", "outcome.md", "--json", "--root", root)).stdout);
+  assert.equal(first.recorded, true);
+  const second = JSON.parse((await runCli("memory", "record", "--file", "outcome.md", "--json", "--root", root)).stdout);
+  assert.equal(second.recorded, false);
+  const preview = JSON.parse((await runCli("memory", "refresh", "--dry-run", "--json", "--root", root)).stdout);
+  assert.equal(preview.revision, first.memory.revision);
+  assert.match(preview.projection.pages["project-state"], /Recorded through the CLI/);
+  assert.deepEqual(JSON.parse((await runCli("memory", "verify", "--root", root)).stdout).issues, []);
+});
+
 test("CLI rejects removed, unknown, missing-value, and command-irrelevant options", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-options-"));
   await runCli("init", "--root", root);

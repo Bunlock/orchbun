@@ -2,8 +2,10 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
-import { assertValidDirectMemory, loadDirectMemory } from "./direct-memory.js";
+import { assertValidDirectMemory, loadDirectMemory, recordDirectMemory } from "./direct-memory.js";
 import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
+import { refreshMemory } from "./memory-refresh.js";
+import { readProjectMarkdown } from "./memory-workspace.js";
 import { createMemoryServer } from "./memory-web.js";
 import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
 import { sweepMemory } from "./memory-sweep.js";
@@ -23,6 +25,8 @@ Usage:
   orchbun workspaces list|inspect|cleanup [--run ID] [--json]
   orchbun runtime status|rebuild|logs
   orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
+  orchbun memory refresh [--dry-run] [--json]
+  orchbun memory record --file NOTE.md [--agent AGENT] [--json]
   orchbun memory sleep [--dry-run] [--json]
   orchbun memory sweep [--dry-run] [--json]
   orchbun memory show|runs|rebuild|verify|compact|sleep|sweep|web [--port PORT]
@@ -125,6 +129,7 @@ async function runCompactCommand(
   }
   if (all) {
     const receipt = await compactAllApprovedMilestones(orchestrator.journal, scope);
+    await refreshMemory(orchestrator.journal, root);
     console.log(args.options.has("json")
       ? JSON.stringify(receipt)
       : `Compacted ${receipt.compacted.length} milestone(s); skipped ${receipt.skipped} already published.`);
@@ -135,6 +140,7 @@ async function runCompactCommand(
     ? path.resolve(root, option(args, "manifest")!)
     : path.join(orchestrator.journal.memoryRoot, "milestones", milestone, "approved.yaml");
   const receipt = await compactMemory(orchestrator.journal, manifest, milestone, scope);
+  await refreshMemory(orchestrator.journal, root);
   console.log(args.options.has("json") ? JSON.stringify(receipt) : `${receipt.milestone} compacted → ${receipt.archivePath}`);
 }
 
@@ -193,6 +199,18 @@ async function main(): Promise<void> {
   }
 
   if (command === "memory") {
+    if (subcommand === "refresh") {
+      const memory = await refreshMemory(orchestrator.journal, root, !args.options.has("dry-run"));
+      console.log(args.options.has("json") ? JSON.stringify(memory, null, 2) : `${args.options.has("dry-run") ? "Preview" : "Current"} project state: ${memory.revision}\n${memory.changedPages.length ? `Changed pages: ${memory.changedPages.join(", ")}` : "No page changes."}`);
+      return;
+    }
+    if (subcommand === "record") {
+      const file = option(args, "file");
+      if (!file) throw new Error("--file is required for memory record");
+      const receipt = await recordDirectMemory(orchestrator.journal, root, await readProjectMarkdown(root, file), option(args, "agent") ?? "codex");
+      console.log(args.options.has("json") ? JSON.stringify(receipt, null, 2) : `${receipt.recorded ? "Recorded" : "Already recorded"}: ${receipt.path}\nProject state refreshed: ${receipt.memory.revision}`);
+      return;
+    }
     if (subcommand === "sleep") {
       const publish = !args.options.has("dry-run");
       if (publish) await orchestrator.journal.initialize();
@@ -226,13 +244,13 @@ async function main(): Promise<void> {
       return;
     }
     if (subcommand === "verify") {
-      const report = await verifyMemory(orchestrator.journal);
+      const report = await verifyMemory(orchestrator.journal, root);
       console.log(JSON.stringify(report, null, 2));
       if (report.issues.length) process.exitCode = 1;
       return;
     }
     if (subcommand === "web") {
-      await rebuildMemory(orchestrator.journal, root);
+      await refreshMemory(orchestrator.journal, root);
       const viewer = createMemoryServer(orchestrator.journal.memoryRoot, { projectRoot: root });
       const selectedPort = port(args);
       await new Promise<void>((resolve, reject) => {
@@ -264,11 +282,8 @@ async function main(): Promise<void> {
       return;
     }
     if (subcommand === "show") {
-      await rebuildMemory(orchestrator.journal, root);
-      const working = path.join(memoryRoot(root, config), "working");
-      for (const file of ["project-state.md", "active-tasks.md", "decisions.md", "contracts.md", "risks.md"]) {
-        console.log(await readFile(path.join(working, file), "utf8"));
-      }
+      const memory = await refreshMemory(orchestrator.journal, root);
+      for (const page of Object.values(memory.projection.pages)) console.log(page);
       return;
     }
     throw new Error("Usage: orchbun memory show|runs|rebuild|verify|compact|sleep|sweep|web");
@@ -338,6 +353,7 @@ function validateInvocation(args: ParsedArgs): void {
     allowed = ["agent", "prompt", "prompt-file", "task", "mode", "context", "model", "root", "json", ...(command === "context" ? [] : ["dry-run"] )];
   } else if (command === "memory" && subcommand) {
     const memoryOptions: Record<string, string[]> = {
+      refresh: ["root", "dry-run", "json"], record: ["root", "file", "agent", "json"],
       show: ["root"], runs: ["root"], rebuild: ["root"], verify: ["root"],
       compact: ["root", "milestone", "all", "scope", "manifest", "json"],
       sleep: ["root", "dry-run", "json"], sweep: ["root", "dry-run", "json"], web: ["root", "port"],

@@ -60,7 +60,7 @@ test("roadmap projection rewrites only its own region and never emits parseable 
 
   const notes: DirectMemoryNote[] = [
     note({ id: "20260810T120000Z-ad-hoc-open", task: "**ZZZ-9** Tune the launcher copy", timestamp: "2026-08-10T12:00:00Z" }),
-    note({ id: "20260810T120100Z-ad-hoc-done", task: "Fix the recovery code", timestamp: "2026-08-10T12:01:00Z", status: "retired", reason: "Shipped." }),
+    note({ id: "20260810T120100Z-ad-hoc-done", task: "Fix the recovery code", timestamp: "2026-08-10T12:01:00Z", status: "retired", workStatus: "completed", reason: "Shipped." }),
     note({ id: "20260810T120200Z-roadmapped", task: "HEX-A1 foundation work", timestamp: "2026-08-10T12:02:00Z" }),
   ];
 
@@ -136,7 +136,7 @@ test("milestone headings accept nested and Phase-prefixed forms without swallowi
 test("roadmap projection keeps delivered entries after their note is archived", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-projection-retain-"));
   await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n\n## A — Foundation\n\n- [ ] **HEX-A1** Step.\n");
-  const shipped = note({ id: "20260810T120000Z-shipped", task: "Ship the launcher", status: "retired", reason: "Delivered." });
+  const shipped = note({ id: "20260810T120000Z-shipped", task: "Ship the launcher", status: "retired", workStatus: "completed", reason: "Delivered." });
   const next = () => note({ id: "20260810T120100Z-next", task: "Start the next thing" });
 
   assert.equal(await syncRoadmapProjection(root, [shipped]), "updated");
@@ -149,4 +149,13 @@ test("roadmap projection keeps delivered entries after their note is archived", 
   assert.match(after, /- \[ \] Start the next thing/);
 
   assert.equal(await syncRoadmapProjection(root, [next()]), "unchanged");
+});
+
+test("retiring a memory note does not establish delivery", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-roadmap-lifecycle-"));
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n");
+  await syncRoadmapProjection(root, [note({ id: "20260810T120000Z-obsolete", task: "Explore the discarded approach", status: "retired", reason: "No longer relevant." })]);
+  const text = await readFile(path.join(root, "ROADMAP.md"), "utf8");
+  assert.doesNotMatch(text, /\[x\]/);
+  assert.match(text, /delivery not established/);
 });

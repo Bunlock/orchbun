@@ -68,11 +68,46 @@ The header derives the project name from its package metadata or directory and d
 
 ### Editing and project files
 
-Each memory page supports Preview, Raw, Edit, and Save. Saved memory pages become persistent local overrides under `memory/agents/manual/`; rebuild and compaction reapply them instead of silently discarding edits.
+Each memory page supports Preview, Raw, Edit annotations, and Save. Human annotations stay under `memory/agents/manual/` and appear alongside generated state. Existing full-page overrides are preserved as annotations without rewriting their source files. They no longer hide newer recorded outcomes, task status, or risk resolution. The editor edits annotations only; Preview shows the combined result. Saves carry a source revision and reject outdated drafts before applying them.
 
 The Project files page opens and edits project-relative Markdown paths. `ROADMAP.md` and `AGENTS.md` are the defaults. Absolute paths, non-Markdown files, and paths outside the project are rejected.
 
 Roadmap checkboxes are validation gates. A milestone can be approved only when all of its steps are checked and `memory verify` passes. Approval creates a schema-valid local manifest under `memory/agents/milestones/<milestone>/approved.yaml`; compaction remains a separate, explicit publish action.
+
+### Keeping project state current
+
+`orchbun memory refresh` reads the roadmap, compact baseline, normalized run records, direct notes, and human annotations/qualifications. It publishes one revision shared by the web workspace and generated Markdown. Unchanged inputs keep the same revision and refresh time and do not rewrite pages. No model call, raw transcript scan, roadmap completion, archival, or rebuild hook is involved.
+
+Managed agents calculate current context before a run and refresh after recording its outcome. `orchbun context`, run dry-runs, and `memory refresh --dry-run` calculate state without initializing memory or writing files. The web workspace checks on opening, refocusing, every 15 seconds while visible, and when Refresh is clicked. Saves refresh before returning. Unsaved drafts survive background refresh; a conflicting save reports that the draft has not been applied. Review updates displays the newer content alongside the preserved draft, so you can reconcile it before saving.
+
+The header shows the last successful refresh and revision, separately from the last **recorded** verification. Refresh does not rerun tests. A failed refresh keeps the last valid snapshot available and shows the failure. Interrupted working-directory publication is recovered on the next publishing refresh.
+
+For a direct agent outcome, prepare a project-relative Markdown file:
+
+```markdown
+# Task outcome
+- **Agent:** codex
+- **Recorded at:** 2026-09-05T12:00:00Z
+- **Task:** APP-A1
+- **Outcome:** Implemented the change; browser verification remains pending.
+- **Decisions:** Keep the existing storage contract.
+- **Risks or blockers:** Browser verification pending.
+- **Next actions:** Verify APP-A1 in the browser.
+- **Changed files:** src/example.ts
+- **Verification:** Focused unit tests passed.
+- **Status:** active
+- **Work status:** partial
+```
+
+```sh
+orchbun memory record --file outcome.md --json
+orchbun memory refresh --dry-run --json
+orchbun memory verify
+```
+
+Use the actual recording time. The record command fills missing Agent and Recorded at fields, validates the complete note before writing it, and gives it an immutable ID. Supplying Recorded at makes retrying identical content idempotent. `Supersedes` explicitly replaces older notes; `Subjects` groups them without deciding which is current. Work status is optional (`completed`, `partial`, `blocked`, or `cancelled`) and does not check a roadmap task. A note saved before a refresh failure remains recorded; correct the source issue and run `memory refresh`.
+
+Risk bullets can carry a stable identity, for example `- [risk:browser-proof] Browser verification pending.` Keep the identity when editing the wording to retain its qualification and resolution. Existing unlabelled risks retain their content-based IDs.
 
 ### Roadmap format
 
@@ -80,7 +115,7 @@ A milestone is a level 2 to 4 heading of the form `<ID> — <Title>`, with an op
 
 `active-tasks.md` leads with the first incomplete milestone, then lists the remaining open steps under `## Scheduled`, so no known roadmap work is hidden while the current milestone stays in front.
 
-`memory rebuild` also projects ad-hoc work back into the roadmap. Direct notes whose task and next actions name no roadmap step are written as a plain checklist between `<!-- orchbun:phase-p:start -->` and `<!-- orchbun:phase-p:end -->` under `## Phase P — Product work tracked in direct notes`, appended once if those markers are absent. Entries are unchecked while their note is active and checked once it is retired or superseded. Everything outside the markers is left byte for byte; the generated lines carry no task ID, so they never gate a milestone approval. A project with no ad-hoc notes and no markers is not touched.
+`memory rebuild` also projects ad-hoc work back into the roadmap. Direct notes whose task and next actions name no roadmap step are written as a plain checklist between `<!-- orchbun:phase-p:start -->` and `<!-- orchbun:phase-p:end -->` under `## Phase P — Product work tracked in direct notes`, appended once if those markers are absent. Entries are checked only when their note explicitly records `Work status: completed`. Retired, superseded, or cancelled records without completed work appear separately; retiring memory does not establish delivery. Previously recorded delivered entries whose source has been archived remain in the historical checklist. Everything outside the markers is left byte for byte; the generated lines carry no task ID, so they never gate a milestone approval. A project with no ad-hoc notes and no markers is not touched.
 
 ### Severity, urgency, and priority
 
@@ -114,9 +149,11 @@ OrchBun rejects unknown options and options that do not apply to the selected co
 | `orchbun runtime status` | Show the current run's allowlisted Compose status | managed isolated runs only |
 | `orchbun runtime rebuild` | Rebuild/recreate the current run's configured services | managed isolated runs only |
 | `orchbun runtime logs` | Read the last 200 lines from the current run's configured services | managed isolated runs only |
-| `orchbun memory show` | Rebuild and print the five working pages | `--root` |
+| `orchbun memory show` | Refresh and print the five working pages | `--root` |
 | `orchbun memory runs` | List managed runs and direct notes | `--root` |
-| `orchbun memory rebuild` | Regenerate projections and reapply local overrides | `--root` |
+| `orchbun memory refresh` | Refresh local project views, or calculate a read-only preview | `--dry-run`, `--json`, `--root` |
+| `orchbun memory record` | Validate and append an immutable note, then refresh | `--file`, `--agent`, `--json`, `--root` |
+| `orchbun memory rebuild` | Explicitly maintain the roadmap projection, refresh views, and run the configured hook | `--root` |
 | `orchbun memory verify` | Validate runs, direct notes, manifests, archives, and image records | `--root` |
 | `orchbun memory sleep` | Preview or publish deterministic roadmap reconciliation | `--dry-run`, `--json`, `--root` |
 | `orchbun memory sweep` | Preview or publish lifecycle-aware archival and verification | `--dry-run`, `--json`, `--root` |
@@ -192,6 +229,7 @@ project/
       working/              generated projections
       archive/              compaction and sweep snapshots
       sleep/                deterministic reconciliation snapshots
+      refresh/              current project-state snapshot and recovery receipt
 ```
 
 Raw prompts and native provider responses are retained for audit but never loaded automatically into future prompts. `memory/design/` is also opt-in context only.
@@ -224,7 +262,7 @@ artifacts:
 supersedes: []
 ```
 
-Compaction archives the prior working tree with its manifest and publication receipt, publishes the accepted baseline atomically, and reapplies intentional manual overrides.
+Compaction archives the prior working tree with its manifest and publication receipt, publishes the accepted baseline atomically, and preserves human annotations alongside the accepted baseline.
 
 ## Provider-neutral image generation
 

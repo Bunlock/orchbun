@@ -4,6 +4,7 @@ import type { OrchbunConfig } from "./config.js";
 import { memoryRoot, pathExists } from "./config.js";
 import type { ContextPacket, RunMode } from "./types.js";
 import { contentHash, estimateTokens, safeWorkspacePath, truncate } from "./utils.js";
+import type { MemoryPageId } from "./memory-overrides.js";
 
 interface ContextOptions {
   sourcePrompt: string;
@@ -12,6 +13,7 @@ interface ContextOptions {
   contextFiles: string[];
   allowDelegation: boolean;
   runtimeAvailable?: boolean;
+  memoryPages?: Record<MemoryPageId, string>;
 }
 
 interface Candidate {
@@ -53,12 +55,13 @@ export async function buildContextPacket(
 
   for (const [index, relative] of WORKING_FILES.entries()) {
     const absolute = path.join(localMemory, relative);
-    if (await pathExists(absolute)) {
+    const projected = options.memoryPages?.[path.basename(relative, ".md") as MemoryPageId];
+    if (projected !== undefined || await pathExists(absolute)) {
       candidates.push({
         label: "WORKING MEMORY",
         relativePath: path.relative(controlRoot, absolute),
         priority: 100 - index,
-        text: await readFile(absolute, "utf8"),
+        text: projected ?? await readFile(absolute, "utf8"),
       });
     }
   }

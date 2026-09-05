@@ -1,5 +1,7 @@
-import { readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { RunJournal } from "./journal.js";
+import { contentHash, compactTimestamp, slug } from "./utils.js";
 
 export const DIRECT_MEMORY_PROTOCOL = `# Direct agent memory
 
@@ -12,6 +14,8 @@ This directory stores compact memory notes from agents prompted outside Orchbun.
 - Optionally add \`Supersedes\` with one or more earlier note IDs to retire their current decisions, risks, and next actions without deleting history.
 - Optionally add \`Subjects\` with stable keys such as \`memory/sleep\` to support deterministic, non-semantic grouping.
 - Keep notes factual and compact. Do not place raw transcripts or secrets here.
+- Use \`orchbun memory record --file outcome.md\` to validate, record, and refresh an update. The command fills missing Agent and Recorded at fields; supply Recorded at for retry-safe recording.
+- Optional \`Work status\` is completed, partial, blocked, or cancelled. It describes work, independently of the note lifecycle. Retirement and supersession never establish delivery.
 - Orchbun validates these notes and merges them into generated working memory.
 `;
 
@@ -32,6 +36,7 @@ export interface DirectMemoryNote {
   agent?: string;
   recordedAt?: string;
   status: "active" | "retired" | "superseded";
+  workStatus?: "completed" | "partial" | "blocked" | "cancelled";
   reason?: string;
 }
 
@@ -40,7 +45,7 @@ export interface DirectMemoryLoadResult {
   issues: string[];
 }
 
-type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes" | "subjects";
+type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes" | "subjects" | "workStatus";
 
 const FIELD_NAMES: Record<string, FieldName> = {
   agent: "agent",
@@ -53,6 +58,7 @@ const FIELD_NAMES: Record<string, FieldName> = {
   "changed files": "changedFiles",
   verification: "verification",
   status: "status",
+  "work status": "workStatus",
   reason: "reason",
   supersedes: "supersedes",
   subjects: "subjects",
@@ -60,9 +66,10 @@ const FIELD_NAMES: Record<string, FieldName> = {
 const REQUIRED_LABELS = ["task", "outcome", "decisions", "risks or blockers", "next actions", "changed files", "verification"];
 const NOTE_FILE = /^(\d{8}T\d{6}Z)-([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.md$/;
 
-export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemoryLoadResult> {
+export async function loadDirectMemory(memoryRoot: string, pending?: { relativePath: string; markdown: string }): Promise<DirectMemoryLoadResult> {
   const root = path.join(memoryRoot, "direct");
   const files = await markdownFiles(root);
+  if (pending) files.push(path.join(memoryRoot, pending.relativePath));
   const notes: DirectMemoryNote[] = [];
   const issues: string[] = [];
 
@@ -83,7 +90,7 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
       issues.push(`${relativePath}: invalid UTC timestamp ${compactTimestamp}`);
       continue;
     }
-    const parsed = parseFields(await readFile(absolute, "utf8"));
+    const parsed = parseFields(pending?.relativePath === relativePath ? pending.markdown : await readFile(absolute, "utf8"));
     const missing = REQUIRED_LABELS.filter((label) => !parsed.present.has(label));
     if (missing.length) issues.push(`${relativePath}: missing fields ${missing.join(", ")}`);
     if (!parsed.values.task[0]?.trim()) issues.push(`${relativePath}: Task must not be empty`);
@@ -97,6 +104,11 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
     const recordedAt = parsed.values.recordedAt[0]?.trim();
     const rawStatus = parsed.values.status[0]?.trim().toLowerCase();
     const status = rawStatus || "active";
+    const workStatus = parsed.values.workStatus[0]?.trim().toLowerCase();
+    if (workStatus && !["completed", "partial", "blocked", "cancelled"].includes(workStatus)) {
+      issues.push(`${relativePath}: Work status must be completed, partial, blocked, or cancelled`);
+      continue;
+    }
     if (hasProvenanceFields && !agent) issues.push(`${relativePath}: Agent must not be empty when provenance fields are used`);
     if (hasProvenanceFields && !recordedAt) issues.push(`${relativePath}: Recorded at is required when provenance fields are used`);
     if (recordedAt && recordedAt !== timestamp) issues.push(`${relativePath}: Recorded at must match filename timestamp ${timestamp}`);
@@ -122,6 +134,7 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
       ...(agent ? { agent } : {}),
       ...(recordedAt ? { recordedAt } : {}),
       status: status as DirectMemoryNote["status"],
+      ...(workStatus ? { workStatus: workStatus as NonNullable<DirectMemoryNote["workStatus"]> } : {}),
       ...(reason ? { reason } : {}),
     });
   }
@@ -147,6 +160,39 @@ export async function loadDirectMemory(memoryRoot: string): Promise<DirectMemory
   }
   issues.push(...supersessionCycleIssues(notes));
   return { notes, issues };
+}
+
+/** Validate an immutable note before publication; replaying the same explicit timestamp is safe. */
+export async function recordDirectMemory(journal: RunJournal, projectRoot: string, markdown: string, agent = "codex") {
+  if (Buffer.byteLength(markdown, "utf8") > 250_000) throw new Error("Direct note is larger than 250 KB");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,79}$/.test(agent)) throw new Error("Invalid recording agent");
+  const parsed = parseFields(markdown);
+  const timestamp = parsed.values.recordedAt[0] ?? new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) throw new Error("Invalid Recorded at timestamp");
+  const text = `${markdown.trimEnd()}${parsed.values.agent.length ? "" : `\n- **Agent:** ${agent}`}${parsed.values.recordedAt.length ? "" : `\n- **Recorded at:** ${timestamp}`}\n`;
+  const id = `${compactTimestamp(date)}-${slug(parsed.values.task[0] ?? "note").slice(0, 80).replace(/-$/, "")}-${contentHash(text).slice(0, 8)}`;
+  const relativePath = `direct/${id.slice(0, 4)}/${id.slice(4, 6)}/${id}.md`;
+  return journal.withProjectionLock(async () => {
+    const target = path.join(journal.memoryRoot, relativePath);
+    let recorded = false;
+    try {
+      const existing = await readFile(target, "utf8");
+      if (existing !== text) throw new Error("An immutable note already exists with different content");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      assertValidDirectMemory(await loadDirectMemory(journal.memoryRoot, { relativePath, markdown: text }));
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, text, { flag: "wx" });
+      recorded = true;
+    }
+    const { refreshMemoryUnlocked } = await import("./memory-refresh.js");
+    try {
+      return { id, path: relativePath, recorded, memory: await refreshMemoryUnlocked(journal, projectRoot) };
+    } catch (error) {
+      throw new Error(`Note saved at ${relativePath}, but refresh failed: ${error instanceof Error ? error.message : String(error)}. Fix the source issue and run memory refresh.`);
+    }
+  });
 }
 
 export interface DirectMemoryResolution {
@@ -244,7 +290,7 @@ async function markdownFiles(root: string): Promise<string[]> {
 
 function parseFields(text: string): { values: Record<FieldName, string[]>; present: Set<string> } {
   const values: Record<FieldName, string[]> = {
-    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [], subjects: [],
+    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [], subjects: [], workStatus: [],
   };
   const present = new Set<string>();
   let current: FieldName | undefined;

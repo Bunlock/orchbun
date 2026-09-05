@@ -86,7 +86,15 @@ export async function writeProjectMarkdown(projectRoot: string, relativePath: st
 export async function loadQualifications(memoryRoot: string): Promise<Record<string, Qualification>> {
   try {
     const store = JSON.parse(await readFile(path.join(memoryRoot, "manual", "qualifications.json"), "utf8")) as QualificationStore;
-    return store.schemaVersion === 1 && store.entries && typeof store.entries === "object" ? store.entries : {};
+    if (store.schemaVersion !== 1 || !store.entries || typeof store.entries !== "object" || Array.isArray(store.entries)) throw new Error("Invalid qualification store");
+    const entries: Record<string, Qualification> = {};
+    for (const [key, value] of Object.entries(store.entries)) {
+      if (!value || typeof value !== "object") throw new Error("Invalid qualification entry");
+      const qualification = validateQualification(value);
+      if (key !== `${qualification.kind}:${qualification.id}`) throw new Error("Qualification key does not match its target");
+      entries[key] = qualification;
+    }
+    return entries;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return {};
@@ -97,6 +105,14 @@ export async function saveQualification(
   memoryRoot: string,
   value: Omit<Qualification, "priority" | "actionLevel">,
 ): Promise<Qualification> {
+  const qualification = validateQualification(value);
+  const entries = await loadQualifications(memoryRoot);
+  entries[`${value.kind}:${value.id}`] = qualification;
+  await atomicJson(path.join(memoryRoot, "manual", "qualifications.json"), { schemaVersion: 1, entries } satisfies QualificationStore);
+  return qualification;
+}
+
+export function validateQualification(value: Omit<Qualification, "priority" | "actionLevel">): Qualification {
   if (!/^(task|risk)$/.test(value.kind) || !value.id || value.id.length > 200) throw new Error("Invalid qualification target");
   if (!["unrated", "critical", "major", "minor"].includes(value.severity)) throw new Error("Invalid severity");
   if (!["unrated", "high", "medium", "low"].includes(value.urgency)) throw new Error("Invalid urgency");
@@ -104,9 +120,6 @@ export async function saveQualification(
   if (!allowedStatuses.includes(value.status)) throw new Error(`Invalid ${value.kind} status`);
   const { priority, actionLevel } = qualify(value.severity, value.urgency);
   const qualification: Qualification = { ...value, priority, actionLevel };
-  const entries = await loadQualifications(memoryRoot);
-  entries[`${value.kind}:${value.id}`] = qualification;
-  await atomicJson(path.join(memoryRoot, "manual", "qualifications.json"), { schemaVersion: 1, entries } satisfies QualificationStore);
   return qualification;
 }
 
@@ -132,8 +145,10 @@ export function parseRiskItems(markdown: string): RiskItem[] {
   return markdown.split(/\r?\n/).flatMap((line) => {
     const match = /^\s*-\s+(?:\[[ xX]\]\s+)?(.+)$/.exec(line);
     if (!match) return [];
-    const text = match[1]!.trim();
-    return text && !/^none\b/i.test(text) ? [{ id: contentHash(text).slice(0, 16), text }] : [];
+    const value = match[1]!.trim();
+    const named = /^\[risk:([a-zA-Z0-9_-]{1,80})\]\s+(.+)$/.exec(value);
+    const text = named?.[2] ?? value;
+    return text && !/^none\b/i.test(text) ? [{ id: named?.[1] ?? contentHash(text).slice(0, 16), text }] : [];
   });
 }
 

@@ -16,7 +16,9 @@ This directory is local, ignored by Git, and shared by managed agents.
 - \`result.json\` and \`summary.md\` are the normalized compact result.
 - Files under \`working/\` are generated projections. Do not edit them manually.
 - Compact direct-agent notes under \`direct/\` are validated and merged into working memory.
-- \`memory sleep\` reconciles active tasks with the first incomplete roadmap milestone.
+- \`memory refresh\` reconciles current project state without changing roadmap sources or running hooks.
+- \`memory record --file outcome.md\` validates and records a direct outcome, then refreshes state.
+- Web annotations remain under \`manual/\`; they do not replace generated status.
 - \`/compact\` accepts only a reviewed milestone manifest whose decision is \`accepted\`.
 - Compaction archives the previous working context and publishes a durable milestone baseline.
 - \`design/\` and old run history are never loaded automatically.
@@ -45,6 +47,10 @@ export class RunJournal {
   }
 
   async begin(metadata: RunMetadata, packet: ContextPacket): Promise<string> {
+    return this.withProjectionLock(() => this.beginUnlocked(metadata, packet));
+  }
+
+  private async beginUnlocked(metadata: RunMetadata, packet: ContextPacket): Promise<string> {
     const directory = this.runDirectory(metadata.runId);
     await mkdir(path.dirname(directory), { recursive: true });
     await mkdir(directory, { recursive: false });
@@ -67,6 +73,10 @@ export class RunJournal {
     metadata: RunMetadata,
     response: AdapterResponse,
   ): Promise<void> {
+    return this.withProjectionLock(() => this.completeUnlocked(directory, metadata, response));
+  }
+
+  private async completeUnlocked(directory: string, metadata: RunMetadata, response: AdapterResponse): Promise<void> {
     await Promise.all([
       writeFile(path.join(directory, response.nativeFileName), response.nativeOutput),
       ...(response.diagnostics ? [writeFile(path.join(directory, "diagnostics.txt"), response.diagnostics)] : []),
@@ -77,6 +87,10 @@ export class RunJournal {
   }
 
   async fail(directory: string, metadata: RunMetadata, error: unknown): Promise<void> {
+    return this.withProjectionLock(() => this.failUnlocked(directory, metadata, error));
+  }
+
+  private async failUnlocked(directory: string, metadata: RunMetadata, error: unknown): Promise<void> {
     const message = error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error);
     const native = error as { nativeOutput?: unknown; nativeFileName?: unknown };
     await Promise.all([

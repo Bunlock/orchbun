@@ -82,6 +82,7 @@ export async function sleepMemory(
   if (!options.publish) return { snapshot, published: false, snapshotPath: null };
 
   return journal.withProjectionLock(async () => {
+    const snapshot = await buildSleepSnapshot(root, journal);
     const sleepRoot = path.join(journal.memoryRoot, "sleep");
     const snapshots = path.join(sleepRoot, "snapshots");
     const snapshotPath = path.join(snapshots, `${snapshot.snapshotId}.json`);
@@ -98,7 +99,8 @@ export async function sleepMemory(
       roadmapPath: snapshot.roadmap.path,
     };
     await writeFile(path.join(sleepRoot, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
-    await writeFile(path.join(journal.memoryRoot, "working", "active-tasks.md"), renderActiveTasks(snapshot.activeTasks, snapshot.scheduledTasks));
+    const { refreshMemoryUnlocked } = await import("./memory-refresh.js");
+    await refreshMemoryUnlocked(journal, root);
     return {
       snapshot,
       published: true,
@@ -156,8 +158,8 @@ export function renderActiveTasks(tasks: SleepTask[], scheduled: SleepTask[] = [
   return `# Active tasks\n\n${active}\n${scheduled.length ? `\n## Scheduled\n\n${list(scheduled)}\n` : ""}`;
 }
 
-async function buildSleepSnapshot(root: string, journal: RunJournal): Promise<SleepSnapshot> {
-  const roadmap = await loadRoadmap(root);
+export async function buildSleepSnapshot(root: string, journal: RunJournal, roadmapPath = "ROADMAP.md"): Promise<SleepSnapshot> {
+  const roadmap = await loadRoadmap(root, roadmapPath);
   const followupResult = await loadFollowups(journal, roadmap);
   const byId = new Map(roadmap.tasks.map((task) => [task.id, task]));
   const latest = new Map<string, Followup>();

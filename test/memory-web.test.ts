@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { Script } from "node:vm";
 import { RunJournal } from "../src/journal.js";
 import { isAllowedLocalRequest, loadMemorySnapshot, memoryViewerHtml, renderMemoryMarkdown, runMemoryAction } from "../src/memory-web.js";
 
@@ -39,6 +40,9 @@ test("memory web page contains accessible sections and maintenance controls", ()
   assert.match(page, /Blocked/);
   assert.match(page, /Severity/);
   assert.match(page, /\/api\/memory/);
+  const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1];
+  assert.ok(script);
+  assert.doesNotThrow(() => new Script(script));
 });
 
 test("memory web runs the same verification action as the CLI", async () => {

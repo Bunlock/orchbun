@@ -109,3 +109,22 @@ test("refreshes direct memory before building managed context", async () => {
   assert.match(packet.expandedPrompt, /Direct memory is available to managed agents/);
   assert.ok(packet.includedFiles.includes("memory/agents/working/project-state.md"));
 });
+
+test("a refresh failure preserves an already recorded successful run", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-refresh-failure-"));
+  const fake = new FakeAdapter("codex");
+  const orchestrator = new Orchestrator(root, DEFAULT_CONFIG, { codex: {
+    kind: "codex", async execute(packet, options) {
+      const result = await fake.execute(packet, options);
+      const direct = path.join(root, "memory", "agents", "direct", "2026", "09");
+      await mkdir(direct, { recursive: true });
+      await writeFile(path.join(direct, "20260905T120000Z-bad.md"), "# Invalid external note\n");
+      return result;
+    },
+  } });
+  await assert.rejects(orchestrator.run({ agent: "codex", mode: "work", sourcePrompt: "Complete the bounded task.", taskId: null, parentRunId: null, depth: 0, contextFiles: [] }), /is recorded, but project-state refresh failed/);
+  const [directory] = await orchestrator.journal.allRunDirectories();
+  assert.ok(directory);
+  assert.equal((await orchestrator.journal.readMetadata(directory)).status, "completed");
+  assert.equal((await orchestrator.journal.readResult(directory)).outcome, "completed");
+});
