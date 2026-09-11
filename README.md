@@ -27,8 +27,7 @@ The memory server binds to `127.0.0.1`. Project memory remains in the project, i
 
 ## Install
 
-From npm after publication:
-
+From npm [https://www.npmjs.com/package/orchbun]:
 ```sh
 npm install --global orchbun
 ```
