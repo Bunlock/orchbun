@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import YAML from "yaml";
 import type { AdapterOptions, AdapterResponse, AgentAdapter } from "../src/adapters/base.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { verifyMemory } from "../src/memory.js";
@@ -82,6 +83,7 @@ test("records linked parent and child runs without a provider call", async () =>
 test("refreshes direct memory before building managed context", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-orchestrator-"));
   await writeFile(path.join(root, "orchbun.yaml"), "version: 1\n");
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n");
   const directDirectory = path.join(root, "memory", "agents", "direct", "2026", "08");
   await mkdir(directDirectory, { recursive: true });
   await writeFile(path.join(directDirectory, "20260810T122000Z-direct-context.md"), `# Direct context
@@ -108,6 +110,42 @@ test("refreshes direct memory before building managed context", async () => {
 
   assert.match(packet.expandedPrompt, /Direct memory is available to managed agents/);
   assert.ok(packet.includedFiles.includes("memory/agents/working/project-state.md"));
+});
+
+test("managed work never completes an external roadmap task", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-orchestrator-external-"));
+  const requestLog = path.join(root, "provider-requests.jsonl");
+  const provider = path.join(root, "provider.mjs");
+  await writeFile(provider, `
+import { appendFileSync } from "node:fs";
+let raw = "";
+for await (const chunk of process.stdin) raw += chunk;
+const request = JSON.parse(raw);
+appendFileSync(process.argv[2], JSON.stringify(request) + "\\n");
+process.stdout.write(JSON.stringify({
+  schema_version: "1.0",
+  revision: "external-r1",
+  tasks: [{
+    id: "APP-1", title: "Review external completion.", completed: false,
+    milestone_id: "A", milestone_title: "Foundation"
+  }]
+}));
+`);
+  const config = {
+    ...DEFAULT_CONFIG,
+    roadmap: { provider: "external" as const, name: "Fixture", command: [process.execPath, provider, requestLog] },
+  };
+  await writeFile(path.join(root, "orchbun.yaml"), YAML.stringify(config));
+  const orchestrator = new Orchestrator(root, config, { codex: new FakeAdapter("codex") });
+
+  await orchestrator.run({
+    agent: "codex", mode: "work", sourcePrompt: "Complete APP-1 locally.", taskId: "APP-1",
+    parentRunId: null, depth: 0, contextFiles: [],
+  });
+
+  const requests = (await readFile(requestLog, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { operation: string });
+  assert.ok(requests.length >= 1);
+  assert.deepEqual(new Set(requests.map(({ operation }) => operation)), new Set(["list"]));
 });
 
 test("a refresh failure preserves an already recorded successful run", async () => {

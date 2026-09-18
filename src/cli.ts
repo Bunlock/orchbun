@@ -1,12 +1,23 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
+import {
+  CONFIG_FILE,
+  DEFAULT_CONFIG,
+  findWorkspaceRoot,
+  loadConfig,
+  memoryRoot,
+  pathExists,
+  setupSpecFromConfig,
+  type ExternalRoadmapConfig,
+  type SetupSpec,
+} from "./config.js";
 import { assertValidDirectMemory, loadDirectMemory, recordDirectMemory } from "./direct-memory.js";
-import { loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
-import { refreshMemory } from "./memory-refresh.js";
+import { buildMemoryProjection, loadRuns, rebuildMemory, verifyMemory } from "./memory.js";
+import { refreshMemory, refreshMemoryUnlocked } from "./memory-refresh.js";
 import { readProjectMarkdown } from "./memory-workspace.js";
 import { createMemoryServer } from "./memory-web.js";
+import { MemoryService, type DreamProposal, type DreamScope, type MemorySearchResult } from "./memory-service.js";
 import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
 import { sweepMemory } from "./memory-sweep.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
@@ -14,17 +25,26 @@ import { renderActiveTasks, sleepMemory } from "./sleep-memory.js";
 import type { AgentKind, RunMode } from "./types.js";
 import { initializeWorkspace } from "./init.js";
 import { inheritedIsolation, requestRuntimeCommand, type RuntimeCommand } from "./isolation.js";
+import { runSetupWizard } from "./setup-wizard.js";
+import { configureWorkspace, recoverPendingConfiguration, setupSpecForConfigurationRetry } from "./configure.js";
+import { createRoadmapStore } from "./roadmap-store.js";
+import { memoryPageCatalogue } from "./memory-pages.js";
+import { parseRoadmapMarkdown } from "./roadmap.js";
 
 const HELP = `orchbun — local, token-efficient agent orchestration
 
 Usage:
   orchbun init [--root PATH] [--json]
+  orchbun configure [--root PATH]
   orchbun run --agent AGENT --prompt TEXT [--task ID] [--mode review|work]
   orchbun delegate --agent AGENT --prompt TEXT [--mode review|work]
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
   orchbun workspaces list|inspect|cleanup [--run ID] [--json]
   orchbun runtime status|rebuild|logs
   orchbun memory compact (--milestone NAME | --all) [--scope shared] [--manifest PATH]
+  orchbun memory search --query TEXT [--task ID] [--subject KEY] [--history] [--json]
+  orchbun memory dream (--task ID | --subject KEY | --all) [--out FILE] [--json]
+  orchbun memory dream --accept FILE [--agent AGENT] [--json]
   orchbun memory refresh [--dry-run] [--json]
   orchbun memory record --file NOTE.md [--agent AGENT] [--json]
   orchbun memory sleep [--dry-run] [--json]
@@ -38,6 +58,9 @@ Options:
   --root PATH              Workspace root containing orchbun.yaml
   --json                   Print a machine-readable receipt
   --dry-run                Preview without publishing or invoking an agent
+  --history                Include superseded, retired, and archived memory in search
+  --out PATH               Write a new editable dream proposal Markdown file
+  --accept PATH            Accept an edited dream proposal Markdown file
 
 Review mode is the default. Work mode must be explicit.
 `;
@@ -114,13 +137,106 @@ function port(args: ParsedArgs): number {
   return parsed;
 }
 
+function dreamScope(args: ParsedArgs): DreamScope {
+  const taskId = option(args, "task")?.trim();
+  const subject = option(args, "subject")?.trim();
+  if (args.options.has("task") && !taskId) throw new Error("--task must not be empty");
+  if (args.options.has("subject") && !subject) throw new Error("--subject must not be empty");
+  const all = args.options.has("all");
+  if ([Boolean(taskId), Boolean(subject), all].filter(Boolean).length !== 1) {
+    throw new Error("Use exactly one of --task, --subject, or --all for memory dream");
+  }
+  if (taskId) return { taskId };
+  if (subject) return { subject };
+  return { all: true };
+}
+
+async function safeProjectFile(root: string, relativePath: string): Promise<string> {
+  if (!relativePath.trim() || path.isAbsolute(relativePath)) throw new Error("Path must be relative to the project");
+  const project = await realpath(root);
+  const target = path.resolve(project, relativePath);
+  const relative = path.relative(project, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Path must stay inside the project");
+  try {
+    const existing = await realpath(target);
+    const existingRelative = path.relative(project, existing);
+    if (existingRelative.startsWith("..") || path.isAbsolute(existingRelative)) throw new Error("Project file symlink leaves the project");
+    return existing;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  let parent = path.dirname(target);
+  while (true) {
+    try {
+      parent = await realpath(parent);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const next = path.dirname(parent);
+      if (next === parent) throw error;
+      parent = next;
+    }
+  }
+  const parentRelative = path.relative(project, parent);
+  if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) throw new Error("Path directory leaves the project");
+  return target;
+}
+
+const DREAM_FILE_PREFIX = "<!-- orchbun-dream-proposal-v1:";
+
+async function writeDreamFile(root: string, relativePath: string, proposal: DreamProposal): Promise<void> {
+  const target = await safeProjectFile(root, relativePath);
+  const metadata = Buffer.from(JSON.stringify(proposal), "utf8").toString("base64url");
+  const contents = `${DREAM_FILE_PREFIX}${metadata} -->\n${proposal.draftMarkdown.trimEnd()}\n`;
+  if (Buffer.byteLength(contents, "utf8") > 1_000_000) throw new Error("Dream proposal is larger than 1 MB");
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, contents, { encoding: "utf8", flag: "wx" });
+}
+
+async function readDreamFile(root: string, relativePath: string): Promise<{ proposal: DreamProposal; reviewedMarkdown: string }> {
+  const target = await safeProjectFile(root, relativePath);
+  try {
+    const contents = await readFile(target, "utf8");
+    if (Buffer.byteLength(contents, "utf8") > 1_000_000) throw new Error("Dream proposal is larger than 1 MB");
+    const newline = contents.indexOf("\n");
+    const header = (newline === -1 ? contents : contents.slice(0, newline)).trim();
+    if (!header.startsWith(DREAM_FILE_PREFIX) || !header.endsWith(" -->")) {
+      throw new Error("Dream file is missing Orchbun proposal metadata");
+    }
+    const encoded = header.slice(DREAM_FILE_PREFIX.length, -4).trim();
+    const proposal = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Partial<DreamProposal>;
+    const reviewedMarkdown = newline === -1 ? "" : contents.slice(newline + 1).trim();
+    if (!proposal || typeof proposal !== "object" || typeof proposal.draftMarkdown !== "string" || !reviewedMarkdown) {
+      throw new Error("Dream file must contain reviewed direct-note Markdown");
+    }
+    return { proposal: proposal as DreamProposal, reviewedMarkdown };
+  } catch (error) {
+    if (error instanceof Error && error.message === "Dream file must contain reviewed direct-note Markdown") throw error;
+    if (error instanceof Error && error.message === "Dream proposal is larger than 1 MB") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+    throw new Error("Dream proposal file is invalid; create it with memory dream --out FILE");
+  }
+}
+
+function renderSearch(result: MemorySearchResult): string {
+  if (!result.hits.length) return "No matching memory found.";
+  return result.hits.map((hit) => {
+    const reasons = [
+      ...(hit.rankExplanation.exactTask ? ["exact task"] : []),
+      ...(hit.rankExplanation.exactSubjects.length ? [`subjects: ${hit.rankExplanation.exactSubjects.join(", ")}`] : []),
+      ...(hit.rankExplanation.matchedTerms.length ? [`terms: ${hit.rankExplanation.matchedTerms.join(", ")}`] : []),
+      `lexical: ${hit.rankExplanation.lexicalScore.toFixed(4)}`,
+    ];
+    return `${hit.citation.id}\t${hit.document.lifecycle}\t${hit.citation.path}\n${hit.snippet}\n  ${reasons.join("; ")}`;
+  }).join("\n\n");
+}
+
 async function runCompactCommand(
   args: ParsedArgs,
   root: string,
   orchestrator: Orchestrator,
   usage: string,
 ): Promise<void> {
-  await orchestrator.journal.initialize();
   const milestone = option(args, "milestone");
   const scope = option(args, "scope") ?? "shared";
   const all = args.options.has("all");
@@ -144,6 +260,24 @@ async function runCompactCommand(
   console.log(args.options.has("json") ? JSON.stringify(receipt) : `${receipt.milestone} compacted → ${receipt.archivePath}`);
 }
 
+function externalRoadmapValidator(): (
+  root: string,
+  roadmap: ExternalRoadmapConfig,
+) => Promise<unknown> {
+  return async (root, roadmap) => {
+    const effectiveConfig = await pathExists(path.join(root, CONFIG_FILE))
+      ? await loadConfig(root)
+      : DEFAULT_CONFIG;
+    const snapshot = await createRoadmapStore({
+      root,
+      memoryRoot: memoryRoot(root, effectiveConfig),
+      config: roadmap,
+      cacheWrites: false,
+    }).list({ allowStale: false });
+    return snapshot;
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const [command, subcommand] = args.positional;
@@ -154,14 +288,125 @@ async function main(): Promise<void> {
   validateInvocation(args);
   if (command === "init") {
     const root = path.resolve(option(args, "root") ?? process.cwd());
-    const receipt = await initializeWorkspace(root);
+    const newProject = !(await pathExists(path.join(root, CONFIG_FILE)));
+    if (!newProject) await recoverPendingConfiguration(root);
+    const validator = externalRoadmapValidator();
+    let setup: SetupSpec | undefined;
+    let validatedExternal: unknown;
+    if (newProject && !args.options.has("json") && process.stdin.isTTY === true && process.stdout.isTTY === true) {
+      let current: SetupSpec | undefined;
+      while (true) {
+        const selection = await runSetupWizard({ root, ...(current ? { current } : {}), validateExternalRoadmap: validator });
+        if (!selection) {
+          console.log("Initialization cancelled; no project files were changed.");
+          return;
+        }
+        const selected = selection.setup;
+        if (selected.roadmap.provider === "external") {
+          try {
+            console.log(`Performing final read-only validation for ${selected.roadmap.name}...`);
+            validatedExternal = await validator(root, selected.roadmap);
+          } catch (error) {
+            console.error(`Initialization was not applied: ${error instanceof Error ? error.message : String(error)}`);
+            current = selected;
+            continue;
+          }
+        }
+        setup = selected;
+        break;
+      }
+    }
+    const receipt = await initializeWorkspace(root, {
+      ...(setup ? { setup } : {}),
+      validateExternalRoadmap: setup?.roadmap.provider === "external"
+        ? async () => validatedExternal
+        : validator,
+    });
     console.log(args.options.has("json") ? JSON.stringify(receipt, null, 2) : `Initialized ${receipt.root}\nLocal memory: ${receipt.memoryRoot}${receipt.created.length ? `\nCreated: ${receipt.created.join(", ")}` : "\nExisting project files preserved."}`);
     return;
   }
   const root = option(args, "root")
     ? await findWorkspaceRoot(path.resolve(option(args, "root")!))
     : await findWorkspaceRoot(process.env.ORCHBUN_ROOT ?? process.cwd());
+  await recoverPendingConfiguration(root);
   const config = await loadConfig(root);
+
+  if (command === "configure") {
+    if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+      throw new Error("orchbun configure requires an interactive terminal");
+    }
+    const validator = externalRoadmapValidator();
+    let currentSetup = setupSpecFromConfig(config);
+    while (true) {
+      const selection = await runSetupWizard({
+        root,
+        current: currentSetup,
+        validateExternalRoadmap: validator,
+        allowCreateInternalRoadmap: true,
+      });
+      if (!selection) {
+        console.log("Configuration unchanged.");
+        return;
+      }
+      const { setup, createInternalRoadmap } = selection;
+      try {
+        const receipt = await configureWorkspace(root, {
+          setup,
+          createInternalRoadmap,
+          validateExternalRoadmap: validator,
+          preview: async (candidate) => {
+            const internalRoadmap = candidate.config.roadmap.provider === "internal" ? candidate.config.roadmap : null;
+            const pendingRoadmap = internalRoadmap
+              ? candidate.pendingFiles.find((file) => file.kind === "roadmap")
+              : undefined;
+            const roadmapSnapshot = pendingRoadmap && internalRoadmap
+              ? (() => {
+                const state = parseRoadmapMarkdown(pendingRoadmap.content, internalRoadmap.path);
+                return {
+                  source: {
+                    provider: "internal" as const,
+                    identity: `internal:${internalRoadmap.path}`,
+                    label: internalRoadmap.path,
+                    artifact: internalRoadmap.path,
+                  },
+                  revision: state.hash,
+                  freshness: "fresh" as const,
+                  tasks: state.tasks,
+                  activeMilestone: state.activeMilestone,
+                  completion: null,
+                };
+              })()
+              : undefined;
+            await buildMemoryProjection(candidate.journal, root, {
+              config: candidate.config,
+              cacheWrites: false,
+              requireFreshRoadmap: true,
+              ...(roadmapSnapshot ? { roadmapSnapshot } : {}),
+            });
+          },
+          refresh: async (candidate) => {
+            const refreshed = await refreshMemoryUnlocked(candidate.journal, root);
+            if (refreshed.diagnostics?.length) {
+              throw new Error(refreshed.diagnostics.join("; "));
+            }
+            return refreshed;
+          },
+        });
+        console.log([
+          "Configuration applied.",
+          `Roadmap provider: ${receipt.previousRoadmapProvider} -> ${receipt.roadmapProvider}`,
+          ...(receipt.changes.length ? receipt.changes.map((change) => `- ${change}`) : ["- No setup changes."]),
+          ...(receipt.created.length ? [`Created: ${receipt.created.join(", ")}`] : []),
+          ...(receipt.revision ? [`Memory revision: ${receipt.revision}`] : []),
+        ].join("\n"));
+        return;
+      } catch (error) {
+        if (error instanceof AggregateError) throw error;
+        console.error(`Configuration was not applied: ${error instanceof Error ? error.message : String(error)}`);
+        currentSetup = await setupSpecForConfigurationRetry(root, setup, error);
+      }
+    }
+  }
   const orchestrator = new Orchestrator(root, config);
 
   if (command === "runtime") {
@@ -199,6 +444,50 @@ async function main(): Promise<void> {
   }
 
   if (command === "memory") {
+    if (subcommand === "search") {
+      const query = option(args, "query")?.trim();
+      if (!query) throw new Error("--query is required for memory search");
+      const taskId = option(args, "task")?.trim();
+      const subject = option(args, "subject")?.trim();
+      if (args.options.has("task") && !taskId) throw new Error("--task must not be empty");
+      if (args.options.has("subject") && !subject) throw new Error("--subject must not be empty");
+      const service = await MemoryService.open(root);
+      const result = await service.retrieve({
+        text: query,
+        ...(taskId ? { taskId } : {}),
+        ...(subject ? { subjects: [subject] } : {}),
+        includeHistory: args.options.has("history"),
+      });
+      console.log(args.options.has("json") ? JSON.stringify(result, null, 2) : renderSearch(result));
+      return;
+    }
+    if (subcommand === "dream") {
+      const accept = option(args, "accept")?.trim();
+      if (args.options.has("accept") && !accept) throw new Error("--accept must not be empty");
+      if (accept) {
+        if (option(args, "task") || option(args, "subject") || args.options.has("all") || option(args, "out")) {
+          throw new Error("Use --accept by itself instead of a dream scope or --out");
+        }
+        const { proposal, reviewedMarkdown } = await readDreamFile(root, accept);
+        const service = await MemoryService.open(root);
+        const receipt = await service.acceptDream(proposal, reviewedMarkdown, option(args, "agent") ?? "codex");
+        console.log(args.options.has("json")
+          ? JSON.stringify(receipt, null, 2)
+          : `${receipt.recorded ? "Accepted and recorded" : "Already accepted"}: ${receipt.path}`);
+        return;
+      }
+      if (option(args, "agent")) throw new Error("--agent is supported only with memory dream --accept");
+      const output = option(args, "out")?.trim();
+      if (args.options.has("out") && !output) throw new Error("--out must not be empty");
+      const scope = dreamScope(args);
+      const service = await MemoryService.open(root);
+      const proposal = await service.proposeDream(scope);
+      if (output) await writeDreamFile(root, output, proposal);
+      if (args.options.has("json")) console.log(JSON.stringify(proposal, null, 2));
+      else if (output) console.log(`Dream proposal written to ${output}`);
+      else console.log(proposal.draftMarkdown.trimEnd());
+      return;
+    }
     if (subcommand === "refresh") {
       const memory = await refreshMemory(orchestrator.journal, root, !args.options.has("dry-run"));
       console.log(args.options.has("json") ? JSON.stringify(memory, null, 2) : `${args.options.has("dry-run") ? "Preview" : "Current"} project state: ${memory.revision}\n${memory.changedPages.length ? `Changed pages: ${memory.changedPages.join(", ")}` : "No page changes."}`);
@@ -213,7 +502,7 @@ async function main(): Promise<void> {
     }
     if (subcommand === "sleep") {
       const publish = !args.options.has("dry-run");
-      if (publish) await orchestrator.journal.initialize();
+      if (publish) await orchestrator.journal.initialize(memoryPageCatalogue(config));
       const receipt = await sleepMemory(root, orchestrator.journal, { publish });
       if (args.options.has("json")) {
         console.log(JSON.stringify(receipt, null, 2));
@@ -233,7 +522,7 @@ async function main(): Promise<void> {
       if (!receipt.verification.passed) process.exitCode = 1;
       return;
     }
-    await orchestrator.journal.initialize();
+    await orchestrator.journal.initialize(memoryPageCatalogue(config));
     if (subcommand === "compact") {
       await runCompactCommand(args, root, orchestrator, "Usage: orchbun memory compact (--milestone <name> | --all) [--scope shared] [--manifest PATH]");
       return;
@@ -283,10 +572,12 @@ async function main(): Promise<void> {
     }
     if (subcommand === "show") {
       const memory = await refreshMemory(orchestrator.journal, root);
-      for (const page of Object.values(memory.projection.pages)) console.log(page);
+      const pages = Object.values(memory.projection.pages);
+      if (!pages.length) console.log("No memory pages enabled.");
+      else for (const page of pages) console.log(page);
       return;
     }
-    throw new Error("Usage: orchbun memory show|runs|rebuild|verify|compact|sleep|sweep|web");
+    throw new Error("Usage: orchbun memory show|runs|search|dream|rebuild|verify|compact|sleep|sweep|web");
   }
 
   const isDelegate = command === "delegate";
@@ -342,13 +633,14 @@ async function main(): Promise<void> {
   }
 }
 
-const BOOLEAN_OPTIONS = new Set(["help", "json", "dry-run", "all"]);
+const BOOLEAN_OPTIONS = new Set(["help", "json", "dry-run", "all", "history"]);
 
 function validateInvocation(args: ParsedArgs): void {
   const [command, subcommand, ...extra] = args.positional;
   if (extra.length) throw new Error(`Unexpected argument(s): ${extra.join(" ")}`);
   let allowed: string[];
   if (command === "init" && !subcommand) allowed = ["root", "json"];
+  else if (command === "configure" && !subcommand) allowed = ["root"];
   else if (["run", "delegate", "context"].includes(command ?? "") && !subcommand) {
     allowed = ["agent", "prompt", "prompt-file", "task", "mode", "context", "model", "root", "json", ...(command === "context" ? [] : ["dry-run"] )];
   } else if (command === "memory" && subcommand) {
@@ -356,6 +648,8 @@ function validateInvocation(args: ParsedArgs): void {
       refresh: ["root", "dry-run", "json"], record: ["root", "file", "agent", "json"],
       show: ["root"], runs: ["root"], rebuild: ["root"], verify: ["root"],
       compact: ["root", "milestone", "all", "scope", "manifest", "json"],
+      search: ["root", "query", "task", "subject", "history", "json"],
+      dream: ["root", "task", "subject", "all", "out", "accept", "agent", "json"],
       sleep: ["root", "dry-run", "json"], sweep: ["root", "dry-run", "json"], web: ["root", "port"],
     };
     allowed = memoryOptions[subcommand] ?? [];

@@ -23,6 +23,17 @@
         "accepted_by": { "type": "string", "minLength": 1, "maxLength": 200 }
       }
     },
+    "roadmap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "identity", "artifact", "revision"],
+      "properties": {
+        "provider": { "enum": ["internal", "external"] },
+        "identity": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "artifact": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "revision": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
     "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "validated_outcomes": { "$ref": "#/$defs/shortStrings" },
     "decisions": { "$ref": "#/$defs/shortStrings" },

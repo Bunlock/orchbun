@@ -7,6 +7,12 @@
     "orchbun": "dist/cli.js",
     "orchbun-mcp": "dist/mcp.js"
   },
+  "exports": {
+    "./memory": {
+      "types": "./dist/memory-service.d.ts",
+      "import": "./dist/memory-service.js"
+    }
+  },
   "files": [
     "dist",
     "schemas",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -115,6 +115,19 @@ test("invalid context is rejected before an isolation lease is created", async (
     parentRunId: null, depth: 0, contextFiles: ["missing.md"],
   }), /Context file does not exist/);
   assert.deepEqual(await orchestrator.isolation.list(), []);
+});
+
+test("isolation leases use an absolute configured memory directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-isolation-control-"));
+  const externalMemory = await mkdtemp(path.join(os.tmpdir(), "orchbun-isolation-memory-"));
+  const leases = path.join(externalMemory, "leases");
+  await mkdir(leases);
+  await writeFile(path.join(leases, "external.json"), "{}\n");
+  const config = isolatedConfig();
+  config.memoryDir = externalMemory;
+
+  const manager = new IsolationManager(root, config);
+  assert.equal((await manager.list()).length, 1);
 });
 
 test("compose runtime receives only its allocated project and endpoint environment", async () => {

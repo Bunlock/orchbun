@@ -1,10 +1,25 @@
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import YAML from "yaml";
+import { CONFIG_FILE, loadConfig, pathExists, type RoadmapConfig } from "./config.js";
 import type { RunJournal } from "./journal.js";
 import { readMemoryPage } from "./memory-overrides.js";
+import type { MemoryProjection } from "./memory.js";
 import { verifyMemory } from "./memory.js";
+import {
+  loadApprovedMilestoneManifest,
+  validateApprovedMilestoneManifest,
+  type ApprovedMilestoneManifest,
+  type MilestoneRoadmapEvidence,
+} from "./milestone-memory.js";
 import { loadRoadmap, type RoadmapState } from "./roadmap.js";
+import {
+  createRoadmapStore,
+  RoadmapConflictError,
+  RoadmapStoreError,
+  type RoadmapStore,
+} from "./roadmap-store.js";
 import { contentHash } from "./utils.js";
 
 export type Severity = "unrated" | "critical" | "major" | "minor";
@@ -162,58 +177,191 @@ export async function loadRoadmapSafely(projectRoot: string, relativePath: strin
   }
 }
 
+/**
+ * Resolve the active roadmap through the same configuration path as projection
+ * building. The fallback exists for direct library callers and pre-config
+ * workspaces; configured projects, including legacy web roadmap settings, are
+ * always resolved by loadConfig.
+ */
+export async function createWorkspaceRoadmapStore(
+  projectRoot: string,
+  journal: RunJournal,
+  projection?: Pick<MemoryProjection, "roadmap" | "settings">,
+): Promise<RoadmapStore> {
+  let config: RoadmapConfig;
+  if (await pathExists(path.join(projectRoot, CONFIG_FILE))) {
+    config = (await loadConfig(projectRoot)).roadmap;
+  } else if (projection?.roadmap?.source.provider === "internal") {
+    config = { provider: "internal", path: projection.roadmap.source.artifact };
+  } else {
+    config = { provider: "internal", path: projection?.settings.roadmapPath ?? "ROADMAP.md" };
+  }
+  return createRoadmapStore({ root: projectRoot, memoryRoot: journal.memoryRoot, config });
+}
+
+type MilestoneProjection = Pick<MemoryProjection, "roadmap" | "sections" | "settings">;
+
+export async function approveMilestone(
+  projectRoot: string,
+  journal: RunJournal,
+  projection: MilestoneProjection,
+  milestone: string,
+  acceptedBy?: string,
+  now?: Date,
+): Promise<{ manifestPath: string; alreadyApproved: boolean }>;
+/** Legacy direct-call form retained for consumers without a published projection. */
 export async function approveMilestone(
   projectRoot: string,
   journal: RunJournal,
   roadmapPath: string,
   milestone: string,
+  acceptedBy?: string,
+  now?: Date,
+): Promise<{ manifestPath: string; alreadyApproved: boolean }>;
+
+export async function approveMilestone(
+  projectRoot: string,
+  journal: RunJournal,
+  projectionOrRoadmapPath: MilestoneProjection | string,
+  milestone: string,
   acceptedBy = "OrchBun memory web",
   now = new Date(),
 ): Promise<{ manifestPath: string; alreadyApproved: boolean }> {
-  const roadmap = await loadRoadmap(projectRoot, roadmapPath);
+  const projection = typeof projectionOrRoadmapPath === "string" ? null : projectionOrRoadmapPath;
+  const legacyRoadmapPath = typeof projectionOrRoadmapPath === "string" ? projectionOrRoadmapPath : null;
+  if (projection?.roadmap?.freshness === "stale") {
+    throw new RoadmapStoreError("unavailable", "A stale external roadmap is read-only until its provider is available and the workspace is refreshed");
+  }
+  const store = projection
+    ? await createWorkspaceRoadmapStore(projectRoot, journal, projection)
+    : createRoadmapStore({
+      root: projectRoot,
+      memoryRoot: journal.memoryRoot,
+      config: { provider: "internal", path: legacyRoadmapPath! },
+    });
+  const roadmap = await store.list({ allowStale: false });
+  if (roadmap.freshness !== "fresh") throw new RoadmapStoreError("unavailable", "A fresh roadmap snapshot is required for milestone approval");
+  if (projection?.roadmap === null) throw new Error("The configured roadmap is unavailable");
+  if (projection?.roadmap && (projection.roadmap.source.identity !== roadmap.source.identity || projection.roadmap.revision !== roadmap.revision)) {
+    throw new RoadmapConflictError(
+      "Roadmap state changed. Refresh and review the newer state before approving the milestone.",
+      projection.roadmap.revision,
+      roadmap.revision,
+    );
+  }
   const tasks = roadmap.tasks.filter((task) => task.milestone === milestone);
   if (!tasks.length) throw new Error(`Milestone ${milestone} has no roadmap steps`);
   const incomplete = tasks.filter((task) => !task.completed);
   if (incomplete.length) throw new Error(`Complete every ${milestone} step before approval: ${incomplete.map((task) => task.id).join(", ")}`);
-  const report = await verifyMemory(journal);
+  const report = await verifyMemory(journal, projection ? projectRoot : undefined);
   if (report.issues.length) throw new Error(`Memory verification must pass before approval: ${report.issues.join("; ")}`);
   const slug = milestone.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "");
   if (!slug) throw new Error("Milestone name cannot be converted to a manifest name");
   const manifestPath = path.join(journal.memoryRoot, "milestones", slug, "approved.yaml");
-  try {
-    await readFile(manifestPath, "utf8");
-    return { manifestPath: path.relative(journal.memoryRoot, manifestPath).split(path.sep).join("/"), alreadyApproved: true };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  const relativeManifestPath = path.relative(journal.memoryRoot, manifestPath).split(path.sep).join("/");
+  const roadmapEvidence: MilestoneRoadmapEvidence = {
+    provider: roadmap.source.provider,
+    identity: roadmap.source.identity,
+    artifact: roadmap.source.artifact,
+    revision: roadmap.revision,
+  };
+  if (await existingApprovalMatches(manifestPath, relativeManifestPath, slug, roadmapEvidence)) {
+    return { manifestPath: relativeManifestPath, alreadyApproved: true };
   }
-  const [projectState, decisions, contracts, risks] = await Promise.all([
-    readMemoryPage(journal.memoryRoot, "project-state"),
-    readMemoryPage(journal.memoryRoot, "decisions"),
-    readMemoryPage(journal.memoryRoot, "contracts"),
-    readMemoryPage(journal.memoryRoot, "risks"),
-  ]);
+  const sections = projection?.sections ?? await legacyMilestoneSections(journal.memoryRoot);
   const title = tasks[0]!.milestoneTitle;
   const settings = await loadWebSettings(journal.memoryRoot);
+  const roadmapArtifact = roadmap.source.provider === "internal"
+    ? { path: roadmap.source.artifact, description: `Validated internal roadmap revision ${roadmap.revision}.` }
+    : {
+      path: roadmap.source.identity,
+      description: `Validated ${roadmap.source.label} roadmap revision ${roadmap.revision}; provider executable ${roadmap.source.artifact}.`,
+    };
   const manifest = {
     schema_version: "1.0",
     milestone: slug,
     scope: "shared",
     review: { decision: "accepted", accepted_at: now.toISOString(), accepted_by: acceptedBy },
-    summary: `${milestone} — ${title} completed and accepted. ${firstContentLine(projectState)}`.slice(0, 2_000),
+    roadmap: roadmapEvidence,
+    summary: `${milestone} — ${title} completed and accepted. ${firstContentLine(sections.projectState)}`.slice(0, 2_000),
     validated_outcomes: tasks.map((task) => `${task.id}: ${task.title}`),
-    decisions: bulletItems(decisions),
-    contracts: bulletItems(contracts),
-    risks: bulletItems(risks),
+    decisions: sections.decisions,
+    contracts: sections.contracts,
+    risks: sections.risks,
     pending_work: roadmap.tasks.filter((task) => !task.completed).map((task) => `${task.id}: ${task.title}`),
     artifacts: [
-      { path: settings.roadmapPath, description: "Validated project roadmap." },
+      roadmapArtifact,
       { path: settings.agentsPath, description: "Project agent workflow contract." },
     ],
     supersedes: [],
-  };
+  } satisfies ApprovedMilestoneManifest;
+  await validateApprovedMilestoneManifest(manifest, "Generated milestone manifest");
   await mkdir(path.dirname(manifestPath), { recursive: true });
-  await atomicWrite(manifestPath, YAML.stringify(manifest));
-  return { manifestPath: path.relative(journal.memoryRoot, manifestPath).split(path.sep).join("/"), alreadyApproved: false };
+  try {
+    await writeImmutable(manifestPath, YAML.stringify(manifest));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (await existingApprovalMatches(manifestPath, relativeManifestPath, slug, roadmapEvidence)) {
+      return { manifestPath: relativeManifestPath, alreadyApproved: true };
+    }
+  }
+  return { manifestPath: relativeManifestPath, alreadyApproved: false };
+}
+
+async function existingApprovalMatches(
+  manifestPath: string,
+  relativeManifestPath: string,
+  expectedMilestone: string,
+  current: MilestoneRoadmapEvidence,
+): Promise<boolean> {
+  let existing: ApprovedMilestoneManifest;
+  try {
+    existing = (await loadApprovedMilestoneManifest(manifestPath)).manifest;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const evidence = existing.roadmap;
+  if (existing.milestone === expectedMilestone
+    && evidence
+    && evidence.provider === current.provider
+    && evidence.identity === current.identity
+    && evidence.artifact === current.artifact
+    && evidence.revision === current.revision) {
+    return true;
+  }
+  throw new RoadmapConflictError(
+    `Milestone ${expectedMilestone} already has immutable approval evidence for a different roadmap source or revision at ${relativeManifestPath}; the existing manifest was preserved`,
+    evidence?.revision ?? null,
+    current.revision,
+  );
+}
+
+async function writeImmutable(file: string, content: string): Promise<void> {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, content, { encoding: "utf8", flag: "wx" });
+    await link(temporary, file);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+async function legacyMilestoneSections(memoryRoot: string): Promise<MemoryProjection["sections"]> {
+  const [projectState, activeTasks, decisions, contracts, risks] = await Promise.all([
+    readMemoryPage(memoryRoot, "project-state"),
+    readMemoryPage(memoryRoot, "active-tasks"),
+    readMemoryPage(memoryRoot, "decisions"),
+    readMemoryPage(memoryRoot, "contracts"),
+    readMemoryPage(memoryRoot, "risks"),
+  ]);
+  return {
+    projectState,
+    activeTasks,
+    decisions: bulletItems(decisions),
+    contracts: bulletItems(contracts),
+    risks: bulletItems(risks),
+  };
 }
 
 function bulletItems(markdown: string): string[] {

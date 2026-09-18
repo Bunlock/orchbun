@@ -7,7 +7,7 @@ import { RunJournal } from "../src/journal.js";
 import { recordDirectMemory } from "../src/direct-memory.js";
 import { MemoryConflict, readRefreshedMemory, refreshMemory, updateMemory } from "../src/memory-refresh.js";
 import { saveMemoryOverride } from "../src/memory-overrides.js";
-import { saveQualification, parseRiskItems } from "../src/memory-workspace.js";
+import { loadQualifications, saveQualification, parseRiskItems } from "../src/memory-workspace.js";
 import { createMemoryServer, loadMemorySnapshot } from "../src/memory-web.js";
 import { rebuildMemory } from "../src/memory.js";
 import { buildContextPacket } from "../src/context.js";
@@ -53,6 +53,31 @@ test("refresh previews and context are read-only, including on a workspace with 
   const packet = await orchestrator.context({ agent: "codex", mode: "review", sourcePrompt: "Review the current task.", taskId: "APP-A1", parentRunId: null, depth: 0, contextFiles: [] });
   assert.match(packet.expandedPrompt, /APP-A1/);
   assert.deepEqual(await readdir(root), before);
+});
+
+test("the next publishing refresh upgrades an unchanged v1 snapshot to schema v2", async () => {
+  const { root, journal } = await workspace();
+  const published = await refreshMemory(journal, root);
+  const statePath = path.join(journal.memoryRoot, "refresh", "state.json");
+  await writeFile(statePath, `${JSON.stringify({ ...published, schemaVersion: 1 }, null, 2)}\n`);
+
+  const upgraded = await refreshMemory(journal, root);
+
+  assert.equal(upgraded.schemaVersion, 2);
+  assert.equal(upgraded.revision, published.revision);
+  assert.equal((JSON.parse(await readFile(statePath, "utf8")) as { schemaVersion: number }).schemaVersion, 2);
+});
+
+test("an unchanged refresh prunes working Markdown outside the configured catalogue", async () => {
+  const { root, journal } = await workspace();
+  const published = await refreshMemory(journal, root);
+  const stalePage = path.join(journal.memoryRoot, "working", "removed-process.md");
+  await writeFile(stalePage, "# Removed process\n");
+
+  const refreshed = await refreshMemory(journal, root);
+
+  assert.equal(refreshed.revision, published.revision);
+  await assert.rejects(readFile(stalePage, "utf8"), { code: "ENOENT" });
 });
 
 test("record refreshes immediately, is idempotent with explicit provenance, and preserves manual content", async () => {
@@ -141,6 +166,22 @@ test("invalid source updates retain the last valid snapshot and recover after co
   assert.deepEqual(await readdir(directory), before);
 });
 
+test("a manual config pointing at a missing internal roadmap preserves the last published view", async () => {
+  const { root, journal } = await workspace();
+  const published = await refreshMemory(journal, root);
+  await writeFile(path.join(root, "orchbun.yaml"), `version: 1
+roadmap:
+  provider: internal
+  path: missing.md
+`);
+
+  await assert.rejects(refreshMemory(journal, root), /Internal roadmap does not exist: missing\.md/);
+  assert.deepEqual(await readRefreshedMemory(journal.memoryRoot), published);
+  const view = await loadMemorySnapshot(journal.memoryRoot, root);
+  assert.equal(view.freshness.status, "refresh-failed");
+  assert.match(view.freshness.error ?? "", /Internal roadmap does not exist: missing\.md/);
+});
+
 test("explicit risk identities survive wording edits", () => {
   assert.equal(parseRiskItems("- [risk:browser-check] Browser proof pending.")[0]?.id, parseRiskItems("- [risk:browser-check] Browser proof now blocked.")[0]?.id);
 });
@@ -175,9 +216,61 @@ test("web save and refresh enforce revision checks and publish one consistent ta
   assert.equal(save.status, 200, await save.text());
   const current = await (await fetch(`${url}/api/memory`)).json();
   assert.equal(current.roadmap.tasks[0].completed, true);
-  assert.equal(current.qualifications["task:APP-A1"].status, "done");
+  assert.equal(current.qualifications["task:APP-A1"].status, "active");
   assert.doesNotMatch(current.pages.find((page: { id: string }) => page.id === "active-tasks").markdown, /\*\*APP-A1/);
   const stale = await fetch(`${url}/api/qualifications`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, status: "active" }) });
   assert.equal(stale.status, 409);
   assert.match(await readFile(path.join(root, "ROADMAP.md"), "utf8"), /\[x\] \*\*APP-A1/);
+});
+
+test("legacy qualification status cannot complete an external roadmap task", async t => {
+  const { root, journal } = await workspace();
+  const requests = path.join(root, "provider-requests.jsonl");
+  const provider = path.join(root, "provider.mjs");
+  await writeFile(provider, `
+import { appendFileSync } from "node:fs";
+let raw = "";
+for await (const chunk of process.stdin) raw += chunk;
+const request = JSON.parse(raw);
+appendFileSync(process.argv[2], JSON.stringify(request) + "\\n");
+process.stdout.write(JSON.stringify({
+  schema_version: "1.0",
+  revision: "external-r1",
+  tasks: [{
+    id: "APP-A1", title: "Finish the first task.", completed: false,
+    milestone_id: "A", milestone_title: "Foundation"
+  }]
+}));
+`);
+  await writeFile(path.join(root, "orchbun.yaml"), JSON.stringify({
+    version: 1,
+    roadmap: { provider: "external", name: "Fixture Jira", command: [process.execPath, provider, requests] },
+  }));
+  const server = createMemoryServer(journal.memoryRoot, { projectRoot: root });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  const snapshot = await (await fetch(`${url}/api/memory`)).json();
+  const response = await fetch(`${url}/api/qualifications`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      revision: snapshot.revision,
+      kind: "task",
+      id: "APP-A1",
+      status: "done",
+      severity: "major",
+      urgency: "high",
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /Complete external roadmap tasks with the roadmap checkbox/);
+  assert.equal((await loadQualifications(journal.memoryRoot))["task:APP-A1"], undefined);
+  const operations = (await readFile(requests, "utf8")).trim().split("\n")
+    .map(line => (JSON.parse(line) as { operation: string }).operation);
+  assert.ok(operations.length >= 1);
+  assert.deepEqual(new Set(operations), new Set(["list"]));
 });

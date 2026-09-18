@@ -1,6 +1,7 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { atomicReplaceFileIfUnchanged } from "./atomic-file.js";
 import { resolveDirectMemory, type DirectMemoryNote } from "./direct-memory.js";
-import { loadRoadmap, projectMarkdownPath } from "./roadmap.js";
+import { loadRoadmap, resolveProjectMarkdownPath } from "./roadmap.js";
 import { roadmapReferences } from "./sleep-memory.js";
 
 export type RoadmapProjectionResult = "updated" | "unchanged" | "absent" | "missing";
@@ -21,7 +22,13 @@ export async function syncRoadmapProjection(
   notes: DirectMemoryNote[],
   relativePath = "ROADMAP.md",
 ): Promise<RoadmapProjectionResult> {
-  const file = projectMarkdownPath(projectRoot, relativePath);
+  let file: string;
+  try {
+    file = await resolveProjectMarkdownPath(projectRoot, relativePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  }
   let current: string;
   try {
     current = await readFile(file, "utf8");
@@ -60,9 +67,9 @@ export async function syncRoadmapProjection(
     : `${current.trimEnd()}\n\n${HEADING}\n\n${region}\n`;
   if (updated === current) return "unchanged";
 
-  const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, updated);
-  await rename(temporary, file);
+  if (!await atomicReplaceFileIfUnchanged(file, current, updated)) {
+    throw new Error("Roadmap changed while the memory projection was being rebuilt; retry the rebuild");
+  }
   return "updated";
 }
 

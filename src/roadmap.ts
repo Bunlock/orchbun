@@ -1,8 +1,9 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+import { atomicReplaceFileIfUnchanged } from "./atomic-file.js";
 import { contentHash } from "./utils.js";
 
-export type RoadmapUpdate = "updated" | "already-complete" | "not-found" | "missing";
+export type RoadmapUpdate = "updated" | "already-complete" | "not-found" | "missing" | "conflict";
 
 export interface RoadmapTask {
   id: string;
@@ -24,8 +25,13 @@ const TASK_LINE = /^\s*-\s+\[([ xX])\]\s+\*\*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\*\*
 const MILESTONE_LINE = /^#{2,4}\s+(?:Phase\s+)?([A-Z0-9]+)\s+[—-]\s+(.+)$/;
 
 export async function loadRoadmap(root: string, relativePath = "ROADMAP.md"): Promise<RoadmapState> {
-  const roadmapPath = projectMarkdownPath(root, relativePath);
+  const roadmapPath = await resolveProjectMarkdownPath(root, relativePath);
   const raw = await readFile(roadmapPath, "utf8");
+  return parseRoadmapMarkdown(raw, relativePath);
+}
+
+/** Parse an internal roadmap candidate without publishing it to the project. */
+export function parseRoadmapMarkdown(raw: string, relativePath = "ROADMAP.md"): RoadmapState {
   const tasks: RoadmapTask[] = [];
   let milestone = "unscoped";
   let milestoneTitle = "Unscoped";
@@ -69,8 +75,12 @@ export async function loadRoadmap(root: string, relativePath = "ROADMAP.md"): Pr
   };
 }
 
-export async function completeRoadmapTask(root: string, taskId: string): Promise<RoadmapUpdate> {
-  return setRoadmapTaskCompletion(root, taskId, true);
+export async function completeRoadmapTask(
+  root: string,
+  taskId: string,
+  relativePath = "ROADMAP.md",
+): Promise<RoadmapUpdate> {
+  return setRoadmapTaskCompletion(root, taskId, true, relativePath);
 }
 
 export async function setRoadmapTaskCompletion(
@@ -78,8 +88,15 @@ export async function setRoadmapTaskCompletion(
   taskId: string,
   completed: boolean,
   relativePath = "ROADMAP.md",
+  expectedHash?: string,
 ): Promise<RoadmapUpdate> {
-  const roadmap = projectMarkdownPath(root, relativePath);
+  let roadmap: string;
+  try {
+    roadmap = await resolveProjectMarkdownPath(root, relativePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  }
   let current: string;
   try {
     current = await readFile(roadmap, "utf8");
@@ -87,6 +104,7 @@ export async function setRoadmapTaskCompletion(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
     throw error;
   }
+  if (expectedHash !== undefined && contentHash(current) !== expectedHash) return "conflict";
 
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const task = new RegExp(`^(\\s*-\\s+\\[)([ xX])(\\]\\s+\\*\\*${escaped}\\*\\*)`, "m");
@@ -95,10 +113,7 @@ export async function setRoadmapTaskCompletion(
   const isComplete = match[2]!.toLowerCase() === "x";
   if (isComplete === completed) return "already-complete";
   const updated = current.replace(task, `$1${completed ? "x" : " "}$3`);
-  const temporary = `${roadmap}.${process.pid}.tmp`;
-  await writeFile(temporary, updated);
-  await rename(temporary, roadmap);
-  return "updated";
+  return await atomicReplaceFileIfUnchanged(roadmap, current, updated) ? "updated" : "conflict";
 }
 
 export function projectMarkdownPath(root: string, relativePath: string): string {
@@ -108,9 +123,68 @@ export function projectMarkdownPath(root: string, relativePath: string): string 
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, relativePath);
   const relative = path.relative(resolvedRoot, resolved);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     if (relative === "") return resolved;
     throw new Error("Roadmap path must stay inside the project");
   }
   return resolved;
+}
+
+/**
+ * Resolve a roadmap path through its existing filesystem ancestors and reject
+ * symlinks that leave the project. Missing targets are allowed only for an
+ * explicit create flow and are returned beneath the nearest canonical parent.
+ */
+export async function resolveProjectMarkdownPath(
+  root: string,
+  relativePath: string,
+  options: { allowMissing?: boolean } = {},
+): Promise<string> {
+  const lexicalRoot = path.resolve(root);
+  const lexicalTarget = projectMarkdownPath(lexicalRoot, relativePath);
+  const canonicalRoot = await realpath(lexicalRoot);
+  try {
+    const canonicalTarget = await realpath(lexicalTarget);
+    assertInsideProject(canonicalRoot, canonicalTarget);
+    return canonicalTarget;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !options.allowMissing) throw error;
+  }
+
+  try {
+    await lstat(lexicalTarget);
+    throw new Error("Roadmap path must not be a dangling symlink");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  let ancestor = path.dirname(lexicalTarget);
+  while (true) {
+    try {
+      const canonicalAncestor = await realpath(ancestor);
+      assertInsideProject(canonicalRoot, canonicalAncestor);
+      const canonicalTarget = path.resolve(canonicalAncestor, path.relative(ancestor, lexicalTarget));
+      assertInsideProject(canonicalRoot, canonicalTarget);
+      return canonicalTarget;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        const unresolved = await lstat(ancestor);
+        if (unresolved.isSymbolicLink()) throw new Error("Roadmap path must not contain a dangling symlink");
+        throw error;
+      } catch (lstatError) {
+        if ((lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw lstatError;
+      }
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
+}
+
+function assertInsideProject(root: string, target: string): void {
+  const relative = path.relative(root, target);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("Roadmap path must stay inside the project after resolving symlinks");
+  }
 }

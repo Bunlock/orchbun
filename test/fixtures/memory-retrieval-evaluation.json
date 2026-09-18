@@ -1,0 +1,152 @@
+{
+  "documents": [
+    {
+      "id": "20260910T090000Z-task-router",
+      "task": "EVAL-T1 deterministic task retrieval",
+      "outcome": "Quartz routing matches the exact task identity.",
+      "decisions": ["Keep task identifiers authoritative."],
+      "risks": [],
+      "nextActions": ["Retain the quartz task fixture."],
+      "verification": ["Exact-task retrieval fixture reviewed."],
+      "subjects": ["memory/task"]
+    },
+    {
+      "id": "20260910T090100Z-subject-index",
+      "task": "Evaluate subject retrieval",
+      "outcome": "Topaz lookup preserves deterministic subject grouping.",
+      "decisions": ["Rank exact subjects before lexical relevance."],
+      "risks": [],
+      "nextActions": ["Retain the topaz subject fixture."],
+      "verification": ["Exact-subject retrieval fixture reviewed."],
+      "subjects": ["memory/topic"]
+    },
+    {
+      "id": "20260910T090200Z-risk-boundary",
+      "task": "EVAL-R1 retrieval risk boundary",
+      "outcome": "The local retrieval boundary remains active.",
+      "decisions": [],
+      "risks": ["Cobalt credential egress remains prohibited."],
+      "nextActions": ["Keep the cobalt risk in mandatory review."],
+      "verification": ["Risk retrieval fixture reviewed."],
+      "subjects": ["memory/risk"]
+    },
+    {
+      "id": "20260909T080000Z-lifecycle-old",
+      "task": "EVAL-L1 lifecycle retrieval",
+      "outcome": "Legacy vermilion ledger routing is obsolete.",
+      "decisions": ["Use the legacy vermilion route."],
+      "risks": [],
+      "nextActions": [],
+      "verification": ["Historical lifecycle fixture reviewed."],
+      "subjects": ["memory/lifecycle"]
+    },
+    {
+      "id": "20260910T090300Z-lifecycle-current",
+      "task": "EVAL-L1 lifecycle retrieval",
+      "outcome": "Current indigo ledger routing replaces the obsolete path.",
+      "decisions": ["Use the current indigo route."],
+      "risks": [],
+      "nextActions": ["Keep current lifecycle retrieval enabled."],
+      "verification": ["Current lifecycle fixture reviewed."],
+      "subjects": ["memory/lifecycle"],
+      "supersedes": ["20260909T080000Z-lifecycle-old"]
+    },
+    {
+      "id": "20260910T090400Z-parallel-north",
+      "task": "EVAL-P1 parallel-head review",
+      "outcome": "North branch preserves the lunar import decision.",
+      "decisions": ["Keep the lunar import head explicit."],
+      "risks": [],
+      "nextActions": ["Review the north parallel head."],
+      "verification": ["North parallel-head fixture reviewed."],
+      "subjects": ["memory/parallel"]
+    },
+    {
+      "id": "20260910T090500Z-parallel-south",
+      "task": "EVAL-P1 parallel-head review",
+      "outcome": "South branch preserves the solar export decision.",
+      "decisions": ["Keep the solar export head explicit."],
+      "risks": [],
+      "nextActions": ["Review the south parallel head."],
+      "verification": ["South parallel-head fixture reviewed."],
+      "subjects": ["memory/parallel"]
+    },
+    {
+      "id": "20260801T070000Z-retired-history",
+      "task": "EVAL-H1 retired history",
+      "outcome": "Historic ochre archive marker remains auditable.",
+      "decisions": [],
+      "risks": [],
+      "nextActions": [],
+      "verification": ["Retired history fixture reviewed."],
+      "subjects": ["memory/history"],
+      "status": "retired",
+      "reason": "Retired after the replacement was accepted.",
+      "archived": true
+    }
+  ],
+  "compactBaseline": {
+    "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "milestone": "retrieval-eval",
+    "publishedAt": "2026-09-08T12:00:00.000Z",
+    "summary": "The sanitized retrieval evaluation baseline is accepted.",
+    "contracts": ["Never transmit cedar credentials to remote services."],
+    "pendingWork": ["Continue deterministic retrieval evaluation."]
+  },
+  "queries": [
+    {
+      "name": "exact task",
+      "query": { "text": "quartz routing", "taskId": "EVAL-T1" },
+      "requiredSources": ["direct:20260910T090000Z-task-router"],
+      "critical": true
+    },
+    {
+      "name": "exact subject",
+      "query": { "text": "topaz grouping", "subjects": ["memory/topic"] },
+      "requiredSources": ["direct:20260910T090100Z-subject-index"],
+      "critical": true
+    },
+    {
+      "name": "risk evidence",
+      "query": { "text": "cobalt credential egress prohibited", "taskId": "EVAL-R1" },
+      "requiredSources": ["direct:20260910T090200Z-risk-boundary"],
+      "critical": true
+    },
+    {
+      "name": "accepted contract",
+      "query": {
+        "text": "cedar credentials remote services",
+        "subjects": ["milestone/retrieval-eval"]
+      },
+      "requiredSources": ["compact:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      "critical": true
+    },
+    {
+      "name": "current lifecycle head",
+      "query": { "text": "current indigo ledger", "subjects": ["memory/lifecycle"] },
+      "requiredSources": ["direct:20260910T090300Z-lifecycle-current"],
+      "critical": true
+    },
+    {
+      "name": "parallel heads",
+      "query": { "text": "branch preserves decision", "subjects": ["memory/parallel"] },
+      "requiredSources": [
+        "direct:20260910T090400Z-parallel-north",
+        "direct:20260910T090500Z-parallel-south"
+      ],
+      "critical": true
+    },
+    {
+      "name": "superseded history opt-in",
+      "query": { "text": "legacy vermilion obsolete", "includeHistory": true },
+      "requiredSources": ["direct:20260909T080000Z-lifecycle-old"],
+      "critical": true
+    },
+    {
+      "name": "retired archive opt-in",
+      "query": { "text": "historic ochre archive marker", "includeHistory": true },
+      "requiredSources": ["direct:20260801T070000Z-retired-history"],
+      "critical": true
+    }
+  ]
+}

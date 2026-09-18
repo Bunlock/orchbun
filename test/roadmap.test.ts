@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { DirectMemoryNote } from "../src/direct-memory.js";
-import { completeRoadmapTask, loadRoadmap } from "../src/roadmap.js";
+import { completeRoadmapTask, loadRoadmap, resolveProjectMarkdownPath } from "../src/roadmap.js";
 import { syncRoadmapProjection } from "../src/roadmap-projection.js";
 
 test("completeRoadmapTask atomically checks only the matching stable task id", async () => {
@@ -27,6 +27,36 @@ test("completeRoadmapTask leaves missing task ids untouched", async () => {
   await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n\n- [ ] **HEX-A1** Existing.\n");
   assert.equal(await completeRoadmapTask(root, "HEX-Z9"), "not-found");
   assert.equal(await completeRoadmapTask(path.join(root, "absent"), "HEX-Z9"), "missing");
+});
+
+test("internal roadmap reads, projections, and completion reject symlinks outside the project", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "orchbun-roadmap-symlink-"));
+  const root = path.join(parent, "project");
+  const outside = path.join(parent, "outside");
+  await Promise.all([mkdir(root), mkdir(outside)]);
+  const outsideRoadmap = path.join(outside, "ROADMAP.md");
+  const original = "# Outside\n\n- [ ] **HEX-A1** Must remain untouched.\n";
+  await writeFile(outsideRoadmap, original);
+  await symlink(outside, path.join(root, "plans"), "dir");
+
+  await assert.rejects(loadRoadmap(root, "plans/ROADMAP.md"), /resolving symlinks/);
+  await assert.rejects(completeRoadmapTask(root, "HEX-A1", "plans/ROADMAP.md"), /resolving symlinks/);
+  await assert.rejects(syncRoadmapProjection(root, [], "plans/ROADMAP.md"), /resolving symlinks/);
+  assert.equal(await readFile(outsideRoadmap, "utf8"), original);
+});
+
+test("internal roadmap creation rejects a dangling symlink ancestor", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "orchbun-roadmap-dangling-symlink-"));
+  const root = path.join(parent, "project");
+  const missingOutside = path.join(parent, "missing-outside");
+  await mkdir(root);
+  await symlink(missingOutside, path.join(root, "plans"), "dir");
+
+  await assert.rejects(
+    resolveProjectMarkdownPath(root, "plans/new/ROADMAP.md", { allowMissing: true }),
+    /dangling symlink/,
+  );
+  await assert.rejects(readFile(path.join(missingOutside, "new", "ROADMAP.md"), "utf8"), /ENOENT/);
 });
 
 const projectionRoadmap = `# Roadmap

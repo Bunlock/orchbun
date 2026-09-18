@@ -35,6 +35,7 @@ test("memory rebuild runs the configured hook from the project root", async () =
 hooks:
   after_memory_rebuild: node -e "require('node:fs').writeFileSync('hook-ran.txt', 'yes')"
 `);
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n");
 
   await rebuildMemory(journal, root);
 
@@ -355,5 +356,68 @@ ${extra}`;
   assert.deepEqual(loaded.notes.map((note) => note.status), ["retired"]);
   assert.deepEqual(loaded.issues, [
     "direct/2026/08/20260810T120100Z-provenance-half.md: Agent must not be empty when provenance fields are used",
+  ]);
+});
+
+test("direct memory preserves optional synthesis provenance without invalidating legacy notes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-provenance-"));
+  const memoryRoot = path.join(root, "memory", "agents");
+  const directory = path.join(memoryRoot, "direct", "2026", "08");
+  await mkdir(directory, { recursive: true });
+  const body = (task: string, extra = "") => `# Note
+
+- **Task:** ${task}
+- **Outcome:** Recorded.
+- **Decisions:** None
+- **Risks or blockers:** None
+- **Next actions:** None
+- **Changed files:** None
+- **Verification:** Reviewed.
+${extra}`;
+
+  await writeFile(path.join(directory, "20260810T120000Z-legacy-note.md"), body("Legacy note."));
+  await writeFile(path.join(directory, "20260810T120100Z-sourced-note.md"), body("Reviewed synthesis.", `- **Sources:**
+  - direct/2026/08/20260810T120000Z-legacy-note.md
+  - run/20260810T115900Z-codex-example
+`));
+  await writeFile(path.join(directory, "20260810T120200Z-revision-note.md"), body("Revision-bound note.", `- **Based on revision:** ${"A".repeat(64)}
+`));
+
+  const loaded = await loadDirectMemory(memoryRoot);
+  assert.deepEqual(loaded.issues, []);
+  assert.deepEqual(loaded.notes[0]?.sources, []);
+  assert.equal(loaded.notes[0]?.basedOnRevision, undefined);
+  assert.deepEqual(loaded.notes[1]?.sources, [
+    "direct/2026/08/20260810T120000Z-legacy-note.md",
+    "run/20260810T115900Z-codex-example",
+  ]);
+  assert.equal(loaded.notes[1]?.basedOnRevision, undefined);
+  assert.deepEqual(loaded.notes[2]?.sources, []);
+  assert.equal(loaded.notes[2]?.basedOnRevision, "a".repeat(64));
+});
+
+test("direct memory rejects malformed optional synthesis provenance", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-provenance-invalid-"));
+  const memoryRoot = path.join(root, "memory", "agents");
+  const directory = path.join(memoryRoot, "direct", "2026", "08");
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, "20260810T120000Z-malformed-provenance.md"), `# Note
+
+- **Task:** Reviewed synthesis.
+- **Outcome:** Recorded.
+- **Decisions:** None
+- **Risks or blockers:** None
+- **Next actions:** None
+- **Changed files:** None
+- **Verification:** Reviewed.
+- **Sources:** None
+- **Based on revision:** not-a-revision
+`);
+
+  const loaded = await loadDirectMemory(memoryRoot);
+  assert.deepEqual(loaded.notes, []);
+  assert.deepEqual(loaded.issues, [
+    "direct/2026/08/20260810T120000Z-malformed-provenance.md: Sources must contain at least one source ID when present",
+    "direct/2026/08/20260810T120000Z-malformed-provenance.md: Based on revision must be one 64-character hexadecimal revision",
   ]);
 });

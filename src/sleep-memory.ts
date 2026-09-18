@@ -1,10 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertValidDirectMemory, loadDirectMemory, resolveDirectMemory, type DirectMemoryNote } from "./direct-memory.js";
+import { CONFIG_FILE, DEFAULT_CONFIG, loadConfig, memoryRoot, pathExists } from "./config.js";
 import type { RunJournal } from "./journal.js";
 import { loadRuns } from "./memory.js";
 import { readCompactState } from "./milestone-memory.js";
 import { loadRoadmap, type RoadmapState, type RoadmapTask } from "./roadmap.js";
+import { createRoadmapStore, type RoadmapSnapshot } from "./roadmap-store.js";
 import { contentHash } from "./utils.js";
 
 export interface SleepTask {
@@ -78,11 +80,11 @@ export async function sleepMemory(
   journal: RunJournal,
   options: { publish: boolean },
 ): Promise<SleepReceipt> {
-  const snapshot = await buildSleepSnapshot(root, journal);
+  const snapshot = await buildConfiguredSleepSnapshot(root, journal, { allowStale: !options.publish, cacheWrites: false });
   if (!options.publish) return { snapshot, published: false, snapshotPath: null };
 
   return journal.withProjectionLock(async () => {
-    const snapshot = await buildSleepSnapshot(root, journal);
+    const snapshot = await buildConfiguredSleepSnapshot(root, journal, { allowStale: false, cacheWrites: true });
     const sleepRoot = path.join(journal.memoryRoot, "sleep");
     const snapshots = path.join(sleepRoot, "snapshots");
     const snapshotPath = path.join(snapshots, `${snapshot.snapshotId}.json`);
@@ -143,9 +145,34 @@ export async function verifySleep(memoryRoot: string): Promise<string[]> {
   }
 }
 
+/** Reports a published Sleep snapshot whose roadmap source or revision is no longer active. */
+export async function verifySleepRoadmap(memoryRoot: string, roadmap: RoadmapSnapshot): Promise<string[]> {
+  let state: Partial<SleepState>;
+  try {
+    state = JSON.parse(await readFile(path.join(memoryRoot, "sleep", "state.json"), "utf8")) as Partial<SleepState>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [];
+  }
+  if (!state.snapshotId) return [];
+  try {
+    const snapshot = JSON.parse(await readFile(
+      path.join(memoryRoot, "sleep", "snapshots", `${state.snapshotId}.json`),
+      "utf8",
+    )) as Partial<SleepSnapshot>;
+    const active = roadmapState(roadmap);
+    if (snapshot.roadmap?.path !== active.path || snapshot.roadmap.hash !== active.hash) {
+      return ["the active roadmap changed since the current Sleep snapshot; run orchbun memory sleep"];
+    }
+  } catch {
+    // Structural snapshot errors are reported by verifySleep.
+  }
+  return [];
+}
+
 export async function reconciledActiveTasks(root: string, journal: RunJournal): Promise<string | undefined> {
   if (!(await sleepIsEnabled(journal.memoryRoot))) return undefined;
-  const snapshot = await buildSleepSnapshot(root, journal);
+  const snapshot = await buildConfiguredSleepSnapshot(root, journal, { allowStale: true, cacheWrites: false });
   return renderActiveTasks(snapshot.activeTasks, snapshot.scheduledTasks);
 }
 
@@ -160,6 +187,11 @@ export function renderActiveTasks(tasks: SleepTask[], scheduled: SleepTask[] = [
 
 export async function buildSleepSnapshot(root: string, journal: RunJournal, roadmapPath = "ROADMAP.md"): Promise<SleepSnapshot> {
   const roadmap = await loadRoadmap(root, roadmapPath);
+  return buildSleepSnapshotFromRoadmap(journal, roadmap);
+}
+
+/** Builds the deterministic reconciliation from an already normalized roadmap snapshot. */
+export async function buildSleepSnapshotFromRoadmap(journal: RunJournal, roadmap: RoadmapState): Promise<SleepSnapshot> {
   const followupResult = await loadFollowups(journal, roadmap);
   const byId = new Map(roadmap.tasks.map((task) => [task.id, task]));
   const latest = new Map<string, Followup>();
@@ -205,6 +237,38 @@ export async function buildSleepSnapshot(root: string, journal: RunJournal, road
   return {
     ...payload,
     snapshotId: contentHash(JSON.stringify(payload)),
+  };
+}
+
+export async function buildConfiguredSleepSnapshot(
+  root: string,
+  journal: RunJournal,
+  options: { allowStale: boolean; cacheWrites?: boolean },
+): Promise<SleepSnapshot> {
+  const config = await pathExists(path.join(root, CONFIG_FILE)) ? await loadConfig(root) : DEFAULT_CONFIG;
+  const store = createRoadmapStore({
+    root,
+    memoryRoot: memoryRoot(root, config),
+    config: config.roadmap,
+    cacheWrites: options.cacheWrites ?? false,
+  });
+  const snapshot = await store.list({ allowStale: options.allowStale });
+  if (!options.allowStale && snapshot.freshness === "stale") {
+    throw new Error("A fresh roadmap is required to publish Sleep memory");
+  }
+  return buildSleepSnapshotFromRoadmap(journal, roadmapState(snapshot));
+}
+
+export function roadmapState(snapshot: RoadmapSnapshot): RoadmapState {
+  return {
+    path: snapshot.source.provider === "internal"
+      ? snapshot.source.artifact
+      : `external:${snapshot.source.identity}`,
+    hash: snapshot.source.provider === "internal"
+      ? snapshot.revision
+      : contentHash(JSON.stringify({ source: snapshot.source.identity, revision: snapshot.revision })),
+    tasks: snapshot.tasks.map((task) => ({ ...task })),
+    activeMilestone: snapshot.activeMilestone,
   };
 }
 

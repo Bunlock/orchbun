@@ -3,6 +3,11 @@ import path from "node:path";
 import YAML from "yaml";
 import type { AdapterResponse } from "./adapters/base.js";
 import { DIRECT_MEMORY_PROTOCOL } from "./direct-memory.js";
+import {
+  DEFAULT_MEMORY_PAGE_CATALOGUE,
+  initializeMemoryPageStorage,
+  type MemoryPageDefinition,
+} from "./memory-overrides.js";
 import type { AgentResult, ContextPacket, RunMetadata, WorktreeIsolation } from "./types.js";
 
 const PROTOCOL = `# Agent memory protocol
@@ -17,8 +22,10 @@ This directory is local, ignored by Git, and shared by managed agents.
 - Files under \`working/\` are generated projections. Do not edit them manually.
 - Compact direct-agent notes under \`direct/\` are validated and merged into working memory.
 - \`memory refresh\` reconciles current project state without changing roadmap sources or running hooks.
+- Published refreshes maintain a disposable local search index; authoritative records remain Markdown/JSON.
 - \`memory record --file outcome.md\` validates and records a direct outcome, then refreshes state.
-- Web annotations remain under \`manual/\`; they do not replace generated status.
+- \`memory dream\` is read-only until a reviewed, revision-bound proposal is explicitly accepted.
+- Built-in annotations remain under \`manual/\`; custom page Markdown remains under \`manual/pages/\`.
 - \`/compact\` accepts only a reviewed milestone manifest whose decision is \`accepted\`.
 - Compaction archives the previous working context and publishes a durable milestone baseline.
 - \`design/\` and old run history are never loaded automatically.
@@ -27,17 +34,13 @@ This directory is local, ignored by Git, and shared by managed agents.
 export class RunJournal {
   constructor(readonly memoryRoot: string) {}
 
-  async initialize(): Promise<void> {
-    const directories = ["runs", "working", "manual", "locks", "direct", "milestones", "archive", "archive/direct", "archive/runs", "archive/sweeps", "sleep"];
+  async initialize(catalogue: readonly MemoryPageDefinition[] = DEFAULT_MEMORY_PAGE_CATALOGUE): Promise<void> {
+    const directories = ["runs", "working", "manual", "manual/pages", "locks", "direct", "milestones", "archive", "archive/direct", "archive/runs", "archive/sweeps", "sleep", "search"];
     await Promise.all(directories.map((directory) => mkdir(path.join(this.memoryRoot, directory), { recursive: true })));
     await this.writeIfMissing(path.join(this.memoryRoot, "README.md"), PROTOCOL);
     await this.writeIfMissing(path.join(this.memoryRoot, "direct", "README.md"), DIRECT_MEMORY_PROTOCOL);
     await this.writeIfMissing(path.join(this.memoryRoot, "index.md"), "# Agent runs\n\nNo runs recorded.\n");
-    await this.writeIfMissing(path.join(this.memoryRoot, "working", "project-state.md"), "# Project state\n\nNo managed runs recorded.\n");
-    await this.writeIfMissing(path.join(this.memoryRoot, "working", "active-tasks.md"), "# Active tasks\n\nNo active tasks recorded.\n");
-    await this.writeIfMissing(path.join(this.memoryRoot, "working", "decisions.md"), "# Decisions\n\nNo decisions recorded.\n");
-    await this.writeIfMissing(path.join(this.memoryRoot, "working", "contracts.md"), "# Operational constraints\n\nNo operational constraints recorded.\n");
-    await this.writeIfMissing(path.join(this.memoryRoot, "working", "risks.md"), "# Risks and blockers\n\nNo risks recorded.\n");
+    await initializeMemoryPageStorage(this.memoryRoot, catalogue);
   }
 
   runDirectory(runId: string): string {
@@ -63,6 +66,13 @@ export class RunJournal {
         omitted_files: packet.omittedFiles,
         input_characters: packet.inputCharacters,
         estimated_input_tokens: packet.estimatedInputTokens,
+        ...(packet.retrievalComparison ? { retrieval_comparison: {
+          source_revision: packet.retrievalComparison.sourceRevision,
+          baseline_characters: packet.retrievalComparison.baselineCharacters,
+          candidate_characters: packet.retrievalComparison.candidateCharacters,
+          top_citation_ids: packet.retrievalComparison.topCitationIds,
+          mandatory_authority_preserved: packet.retrievalComparison.mandatoryAuthorityPreserved,
+        } } : {}),
       }, null, 2)}\n`),
     ]);
     return directory;
@@ -141,6 +151,7 @@ export class RunJournal {
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (await removeAbandonedProjectionLock(lockPath)) continue;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
     }
@@ -164,6 +175,32 @@ export class RunJournal {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
   }
+}
+
+async function removeAbandonedProjectionLock(lockPath: string): Promise<boolean> {
+  let source: string;
+  try { source = await readFile(lockPath, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+  const pid = Number(source.split(/\r?\n/, 1)[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH") return false;
+  }
+  try {
+    // The lock file cannot be replaced by another owner until this stale inode is removed.
+    // If the prior owner removed it first, the next acquisition attempt is already safe.
+    await rm(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return true;
 }
 
 function toSnakeCaseMetadata(metadata: RunMetadata): Record<string, unknown> {

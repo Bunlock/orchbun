@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
 import type { OrchbunConfig } from "./config.js";
-import { pathExists } from "./config.js";
+import { memoryRoot, pathExists } from "./config.js";
 import { runProcess } from "./adapters/process.js";
 import type { RuntimeIsolation, WorktreeIsolation } from "./types.js";
 import { safeWorkspacePath, slug } from "./utils.js";
@@ -33,8 +33,9 @@ export class IsolationManager {
     private readonly run: ProcessRunner = runProcess,
     private readonly portAvailable: (port: number) => Promise<boolean> = canBind,
   ) {
-    this.leasesRoot = path.join(controlRoot, config.memoryDir, "leases");
-    this.lockPath = path.join(controlRoot, config.memoryDir, "locks", "isolation.lock");
+    const configuredMemoryRoot = memoryRoot(controlRoot, config);
+    this.leasesRoot = path.join(configuredMemoryRoot, "leases");
+    this.lockPath = path.join(configuredMemoryRoot, "locks", "isolation.lock");
   }
 
   async provision(runId: string, taskId: string | null): Promise<WorktreeIsolation> {

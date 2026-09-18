@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { saveMemoryOverride } from "../src/memory-overrides.js";
 import { rebuildMemory } from "../src/memory.js";
 import { loadApprovedMilestoneManifest } from "../src/milestone-memory.js";
 import { setRoadmapTaskCompletion } from "../src/roadmap.js";
+import { RoadmapConflictError } from "../src/roadmap-store.js";
 import {
   approveMilestone,
   loadQualifications,
@@ -84,5 +85,34 @@ test("roadmap validation gates schema-valid milestone approval", async () => {
   assert.equal(manifest.milestone, "a");
   assert.deepEqual(manifest.validated_outcomes.map((item) => item.slice(0, 6)), ["APP-A1", "APP-A2"]);
   assert.ok(manifest.pending_work.some((item) => item.startsWith("APP-B1")));
+  assert.deepEqual(manifest.roadmap, {
+    provider: "internal",
+    identity: "internal:ROADMAP.md",
+    artifact: "ROADMAP.md",
+    revision: manifest.roadmap?.revision,
+  });
   assert.equal((await approveMilestone(root, journal, "ROADMAP.md", "A")).alreadyApproved, true);
+
+  const approved = await readFile(manifestFile, "utf8");
+  await writeFile(path.join(root, "ROADMAP.md"), `${await readFile(path.join(root, "ROADMAP.md"), "utf8")}\nApproved under a later source revision.\n`);
+  await assert.rejects(
+    approveMilestone(root, journal, "ROADMAP.md", "A"),
+    (error: unknown) => {
+      assert.ok(error instanceof RoadmapConflictError);
+      assert.match(error.message, /immutable approval evidence for a different roadmap source or revision/);
+      return true;
+    },
+  );
+  assert.equal(await readFile(manifestFile, "utf8"), approved);
+});
+
+test("generated milestone manifests are schema-validated before publication", async () => {
+  const { root, journal } = await workspace();
+  await setRoadmapTaskCompletion(root, "APP-A1", true);
+  await setRoadmapTaskCompletion(root, "APP-A2", true);
+  await assert.rejects(
+    approveMilestone(root, journal, "ROADMAP.md", "A", "x".repeat(201)),
+    /Generated milestone manifest failed schema validation.*accepted_by.*200/,
+  );
+  await assert.rejects(access(path.join(journal.memoryRoot, "milestones", "a", "approved.yaml")));
 });

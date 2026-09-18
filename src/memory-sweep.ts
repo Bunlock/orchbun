@@ -1,7 +1,9 @@
 import { cp, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_CONFIG, loadConfig } from "./config.js";
 import { loadDirectMemory, resolveDirectMemory, type DirectMemoryNote } from "./direct-memory.js";
 import { loadRuns, rebuildMemoryUnlocked, verifyMemory } from "./memory.js";
+import { memoryPageCatalogue, type MemoryPageDefinition } from "./memory-pages.js";
 import { loadApprovedMilestoneManifest, readCompactState } from "./milestone-memory.js";
 import type { RunJournal } from "./journal.js";
 
@@ -26,15 +28,15 @@ export interface MemorySweepReceipt {
   verification: { passed: boolean; issues: string[] };
 }
 
-const WORKING_FILES = ["project-state.md", "active-tasks.md", "decisions.md", "contracts.md", "risks.md"] as const;
-
 /** Applies only explicit lifecycle markers; candidates remain active until a human records a retirement reason. */
 export async function sweepMemory(journal: RunJournal, options: MemorySweepOptions = {}): Promise<MemorySweepReceipt> {
   const now = options.now ?? new Date();
   const startedAt = isoSecond(now);
   const dryRun = options.dryRun ?? false;
   const executor = options.executor ?? "orchbun memory sweep";
-  await journal.initialize();
+  const config = options.projectRoot ? await loadConfig(options.projectRoot) : DEFAULT_CONFIG;
+  const pageDefinitions = memoryPageCatalogue(config);
+  await journal.initialize(pageDefinitions);
 
   return journal.withProjectionLock(async () => {
     const direct = await loadDirectMemory(journal.memoryRoot);
@@ -49,7 +51,7 @@ export async function sweepMemory(journal: RunJournal, options: MemorySweepOptio
     const archiveRuns = baseline
       ? runs.filter((run) => eligibleRun(run.metadata.startedAt, run.metadata.status, baseline.acceptedAt, now)).map((run) => run.directory)
       : [];
-    const before = await workingLineCounts(journal.memoryRoot);
+    const before = await workingLineCounts(journal.memoryRoot, pageDefinitions);
     const compactId = compactTimestamp(now);
     const snapshotRelative = `archive/sweeps/${compactId.slice(0, 4)}/${compactId.slice(4, 6)}/${compactId}`;
     const snapshot = path.join(journal.memoryRoot, ...snapshotRelative.split("/"));
@@ -64,8 +66,8 @@ export async function sweepMemory(journal: RunJournal, options: MemorySweepOptio
       await rebuildMemoryUnlocked(journal, options.projectRoot);
     }
 
-    const after = dryRun ? before : await workingLineCounts(journal.memoryRoot);
-    const verificationReport = dryRun ? await verifyMemory(journal) : await verifyMemory(journal);
+    const after = dryRun ? before : await workingLineCounts(journal.memoryRoot, pageDefinitions);
+    const verificationReport = await verifyMemory(journal, options.projectRoot);
     const completedAt = isoSecond(new Date());
     const receipt: MemorySweepReceipt = {
       dryRun,
@@ -90,7 +92,7 @@ export async function sweepMemory(journal: RunJournal, options: MemorySweepOptio
       const reportPath = await writeSweepReport(journal.memoryRoot, receipt, executor);
       receipt.reportPath = reportPath;
       await rebuildMemoryUnlocked(journal, options.projectRoot);
-      const finalReport = await verifyMemory(journal);
+      const finalReport = await verifyMemory(journal, options.projectRoot);
       receipt.verification = { passed: finalReport.issues.length === 0, issues: finalReport.issues };
       receipt.report = renderSweepReport(receipt, executor);
     }
@@ -136,8 +138,14 @@ async function archiveRun(memoryRoot: string, directory: string): Promise<void> 
   await rename(directory, destination);
 }
 
-async function workingLineCounts(memoryRoot: string): Promise<Record<string, number>> {
-  const entries = await Promise.all(WORKING_FILES.map(async (file) => [file, await lineCount(path.join(memoryRoot, "working", file))] as const));
+async function workingLineCounts(
+  memoryRoot: string,
+  pageDefinitions: readonly MemoryPageDefinition[],
+): Promise<Record<string, number>> {
+  const entries = await Promise.all(pageDefinitions.map(async (page) => [
+    page.filename,
+    await lineCount(path.join(memoryRoot, "working", page.filename)),
+  ] as const));
   return Object.fromEntries(entries);
 }
 

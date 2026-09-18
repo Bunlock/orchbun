@@ -4,14 +4,27 @@ import path from "node:path";
 import YAML from "yaml";
 import AjvModule from "ajv/dist/2020.js";
 import type { Options, ValidateFunction } from "ajv";
+import { CONFIG_FILE, loadConfig, pathExists } from "./config.js";
 import { loadDirectMemory, assertValidDirectMemory } from "./direct-memory.js";
 import type { RunJournal } from "./journal.js";
 import { contentHash } from "./utils.js";
-import { applyMemoryOverrides } from "./memory-overrides.js";
+import { applyMemoryOverrides, readCustomMemoryPages } from "./memory-overrides.js";
+import {
+  DEFAULT_MEMORY_PAGE_CATALOGUE,
+  memoryPageCatalogue,
+  type MemoryPageDefinition,
+} from "./memory-pages.js";
 
 export interface MilestoneArtifact {
   path: string;
   description: string;
+}
+
+export interface MilestoneRoadmapEvidence {
+  provider: "internal" | "external";
+  identity: string;
+  artifact: string;
+  revision: string;
 }
 
 export interface ApprovedMilestoneManifest {
@@ -23,6 +36,8 @@ export interface ApprovedMilestoneManifest {
     accepted_at: string;
     accepted_by: string;
   };
+  /** Added compatibly to v1 manifests; older accepted manifests may omit it. */
+  roadmap?: MilestoneRoadmapEvidence;
   summary: string;
   validated_outcomes: string[];
   decisions: string[];
@@ -43,6 +58,8 @@ export interface CompactState {
   archivePath: string;
   includedManagedRunIds: string[];
   includedDirectNoteIds: string[];
+  /** Pages present in the archived working tree. Absent on legacy publications. */
+  archivedPages?: Array<{ id: string; filename: string }>;
   baseline: {
     summary: string;
     validatedOutcomes: string[];
@@ -85,6 +102,15 @@ const Ajv = AjvModule as unknown as new (options?: Options) => {
 export async function loadApprovedMilestoneManifest(file: string): Promise<{ manifest: ApprovedMilestoneManifest; raw: string }> {
   const raw = await readFile(file, "utf8");
   const value = YAML.parse(raw) as unknown;
+  const manifest = await validateApprovedMilestoneManifest(value);
+  return { manifest, raw };
+}
+
+/** Validate generated and loaded manifests through the same published schema. */
+export async function validateApprovedMilestoneManifest(
+  value: unknown,
+  label = "Milestone manifest",
+): Promise<ApprovedMilestoneManifest> {
   if (!manifestValidator) {
     const schemaFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../schemas/milestone-manifest.schema.json");
     const schema = JSON.parse(await readFile(schemaFile, "utf8")) as object;
@@ -94,13 +120,13 @@ export async function loadApprovedMilestoneManifest(file: string): Promise<{ man
     const details = manifestValidator.errors
       ?.map((error) => `${error.instancePath || "/"} ${error.message ?? "is invalid"}`)
       .join("; ");
-    throw new Error(`Milestone manifest failed schema validation: ${details}`);
+    throw new Error(`${label} failed schema validation: ${details}`);
   }
   if (!MILESTONE.test(value.milestone)) throw new Error(`Invalid milestone name ${value.milestone}`);
   if (Number.isNaN(Date.parse(value.review.accepted_at))) {
     throw new Error("Milestone manifest review.accepted_at must be an ISO timestamp");
   }
-  return { manifest: value, raw };
+  return value;
 }
 
 export async function readCompactState(memoryRoot: string): Promise<CompactState | undefined> {
@@ -154,6 +180,9 @@ export async function compactMemory(
 
   return journal.withProjectionLock(async () => {
     const prior = await readCompactState(journal.memoryRoot);
+    const published = await publishedCompactionContext(journal.memoryRoot);
+    const pageDefinitions = await configuredPageDefinitions(journal.memoryRoot, published?.pageDefinitions);
+    const customPages = await readCustomMemoryPages(journal.memoryRoot, pageDefinitions);
     const direct = await loadDirectMemory(journal.memoryRoot);
     assertValidDirectMemory(direct);
     const includedManagedRunIds = (await journal.allRunDirectories()).map((directory) => path.basename(directory));
@@ -162,7 +191,9 @@ export async function compactMemory(
     const unique = (items: string[]): string[] => [
       ...new Map(items.filter((item) => !superseded.has(normalize(item))).map((item) => [normalize(item), item.trim()])).values(),
     ];
-    const carried = prior?.baseline ?? {
+    const carried = prior?.baseline ?? published?.sections ?? {
+      // Legacy projects may compact before publishing a normalized v2
+      // projection. Preserve their established working-page behavior.
       decisions: await readBullets(path.join(journal.memoryRoot, "working", "decisions.md")),
       contracts: await readBullets(path.join(journal.memoryRoot, "working", "contracts.md")),
       risks: await readBullets(path.join(journal.memoryRoot, "working", "risks.md")),
@@ -181,6 +212,7 @@ export async function compactMemory(
       archivePath: archiveRelative,
       includedManagedRunIds,
       includedDirectNoteIds,
+      archivedPages: (published?.pageDefinitions ?? pageDefinitions).map(({ id, filename }) => ({ id, filename })),
       baseline: {
         summary: manifest.summary,
         validatedOutcomes: unique([...(prior?.baseline.validatedOutcomes ?? []), ...manifest.validated_outcomes]),
@@ -197,7 +229,7 @@ export async function compactMemory(
     const archive = path.join(journal.memoryRoot, ...archiveRelative.split("/"));
     await mkdir(staged, { recursive: false });
     try {
-      await writeCompactWorking(staged, state);
+      await writeCompactWorking(staged, state, pageDefinitions, customPages);
       await mkdir(path.dirname(archive), { recursive: true });
       await mkdir(archive, { recursive: false });
       await Promise.all([
@@ -211,10 +243,10 @@ export async function compactMemory(
         await rename(path.join(archive, "working"), working);
         throw error;
       }
-      await applyMemoryOverrides(journal.memoryRoot);
+      await applyMemoryOverrides(journal.memoryRoot, pageDefinitions);
     } catch (error) {
       await rm(staged, { recursive: true, force: true });
-      if (!(await exists(path.join(archive, "working")))) {
+      if (!(await directoryExists(path.join(archive, "working")))) {
         await rm(archive, { recursive: true, force: true });
       }
       throw error;
@@ -258,14 +290,26 @@ export async function compactAllApprovedMilestones(
   return { requested: loaded.length, compacted, skipped: loaded.length - pending.length };
 }
 
-export async function writeCompactWorking(directory: string, state: CompactState): Promise<void> {
+export async function writeCompactWorking(
+  directory: string,
+  state: CompactState,
+  pageDefinitions: readonly MemoryPageDefinition[] = DEFAULT_MEMORY_PAGE_CATALOGUE,
+  customPages: Readonly<Record<string, string>> = {},
+): Promise<void> {
   const project = renderCompactProjectState(state);
+  const builtIn: Record<string, string> = {
+    "project-state": project,
+    "active-tasks": `# Active tasks\n\n${markdownList(state.baseline.pendingWork, "No pending work recorded.")}\n`,
+    decisions: `# Decisions\n\n${markdownList(state.baseline.decisions, "No decisions recorded.")}\n`,
+    contracts: `# Operational constraints\n\n${markdownList(state.baseline.contracts, "No operational constraints recorded.")}\n`,
+    risks: `# Risks and blockers\n\n${markdownList(state.baseline.risks, "No risks recorded.")}\n`,
+  };
   await Promise.all([
-    writeFile(path.join(directory, "project-state.md"), project),
-    writeFile(path.join(directory, "active-tasks.md"), `# Active tasks\n\n${markdownList(state.baseline.pendingWork, "No pending work recorded.")}\n`),
-    writeFile(path.join(directory, "decisions.md"), `# Decisions\n\n${markdownList(state.baseline.decisions, "No decisions recorded.")}\n`),
-    writeFile(path.join(directory, "contracts.md"), `# Operational constraints\n\n${markdownList(state.baseline.contracts, "No operational constraints recorded.")}\n`),
-    writeFile(path.join(directory, "risks.md"), `# Risks and blockers\n\n${markdownList(state.baseline.risks, "No risks recorded.")}\n`),
+    ...pageDefinitions.flatMap((page) => page.kind === "builtin" && builtIn[page.id] !== undefined
+      ? [writeFile(path.join(directory, page.filename), builtIn[page.id]!)]
+      : page.kind === "custom"
+        ? [writeFile(path.join(directory, page.filename), customPages[page.id] ?? `# ${page.title}\n`)]
+        : []),
     writeFile(path.join(directory, "compact-state.json"), `${JSON.stringify(state, null, 2)}\n`),
   ]);
 }
@@ -306,6 +350,41 @@ async function readBullets(file: string): Promise<string[]> {
   }
 }
 
+interface PublishedCompactionContext {
+  pageDefinitions: MemoryPageDefinition[];
+  sections: { decisions: string[]; contracts: string[]; risks: string[] };
+}
+
+async function publishedCompactionContext(memoryRoot: string): Promise<PublishedCompactionContext | undefined> {
+  const { readRefreshedMemory } = await import("./memory-refresh.js");
+  const state = await readRefreshedMemory(memoryRoot);
+  if (!state || state.schemaVersion !== 2) return undefined;
+  return {
+    pageDefinitions: state.projection.pageDefinitions,
+    sections: {
+      decisions: [...state.projection.sections.decisions],
+      contracts: [...state.projection.sections.contracts],
+      risks: [...state.projection.sections.risks],
+    },
+  };
+}
+
+async function configuredPageDefinitions(
+  memoryRoot: string,
+  published: readonly MemoryPageDefinition[] | undefined,
+): Promise<MemoryPageDefinition[]> {
+  let candidate = path.resolve(memoryRoot);
+  while (true) {
+    if (await pathExists(path.join(candidate, CONFIG_FILE))) {
+      return memoryPageCatalogue(await loadConfig(candidate));
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  return (published ?? DEFAULT_MEMORY_PAGE_CATALOGUE).map((page) => ({ ...page }));
+}
+
 function markdownList(items: string[], empty: string): string {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : empty;
 }
@@ -323,9 +402,9 @@ function relativeOrAbsolute(root: string, file: string): string {
   return relative.startsWith("../") ? file : relative;
 }
 
-async function exists(candidate: string): Promise<boolean> {
+async function directoryExists(candidate: string): Promise<boolean> {
   try {
-    await readFile(path.join(candidate, "project-state.md"), "utf8");
+    await readdir(candidate);
     return true;
   } catch {
     return false;

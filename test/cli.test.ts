@@ -13,6 +13,16 @@ async function runCli(...args: string[]): Promise<{ stdout: string; stderr: stri
   return execute(process.execPath, ["--import", "tsx", cli, ...args]);
 }
 
+test("package exports the in-process memory service", async () => {
+  const manifest = JSON.parse(await readFile(path.resolve("package.json"), "utf8")) as {
+    exports?: Record<string, { types?: string; import?: string }>;
+  };
+  assert.deepEqual(manifest.exports?.["./memory"], {
+    types: "./dist/memory-service.d.ts",
+    import: "./dist/memory-service.js",
+  });
+});
+
 test("init bootstraps a usable ignored local-memory project without overwriting master files", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-init-"));
   await writeFile(path.join(root, "AGENTS.md"), "# Existing contract\n");
@@ -70,6 +80,51 @@ test("CLI records an immutable outcome and refreshes its current view", async ()
   assert.deepEqual(JSON.parse((await runCli("memory", "verify", "--root", root)).stdout).issues, []);
 });
 
+test("memory search and reviewed dream commands round-trip through a project-local proposal", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-dream-"));
+  await runCli("init", "--root", root);
+  await writeFile(path.join(root, "outcome.md"), `# Retrieval outcome
+- **Recorded at:** 2026-09-17T12:00:00Z
+- **Task:** ORCH-MEM retrieval
+- **Outcome:** The citrus rocket is ready for deterministic recall.
+- **Decisions:** Rank exact subjects before lexical relevance.
+- **Risks or blockers:** None
+- **Next actions:** Review the first retrieval corpus.
+- **Changed files:** None
+- **Verification:** Search integration fixture passed.
+- **Subjects:** memory/retrieval
+- **Work status:** completed
+`);
+  const recorded = JSON.parse((await runCli(
+    "memory", "record", "--file", "outcome.md", "--json", "--root", root,
+  )).stdout) as { id: string };
+
+  const search = JSON.parse((await runCli(
+    "memory", "search", "--query", "citrus rocket", "--subject", "memory/retrieval", "--json", "--root", root,
+  )).stdout) as { hits: Array<{ citation: { id: string }; document: { lifecycle: string } }> };
+  assert.equal(search.hits[0]?.citation.id, `direct:${recorded.id}`);
+  assert.equal(search.hits[0]?.document.lifecycle, "current");
+
+  const preview = JSON.parse((await runCli(
+    "memory", "dream", "--subject", "memory/retrieval", "--out", "review/dream.md", "--json", "--root", root,
+  )).stdout) as { sourceRevision: string; draftMarkdown: string };
+  assert.match(preview.draftMarkdown, /\[source:direct:/);
+  const saved = await readFile(path.join(root, "review", "dream.md"), "utf8");
+  assert.match(saved, /^<!-- orchbun-dream-proposal-v1:/);
+  assert.match(saved, /# Reviewed memory dream/);
+
+  const accepted = JSON.parse((await runCli(
+    "memory", "dream", "--accept", "review/dream.md", "--agent", "cli-reviewer", "--json", "--root", root,
+  )).stdout) as { recorded: boolean; path: string };
+  assert.equal(accepted.recorded, true);
+  assert.match(accepted.path, /^direct\//);
+  const repeated = JSON.parse((await runCli(
+    "memory", "dream", "--accept", "review/dream.md", "--agent", "cli-reviewer", "--json", "--root", root,
+  )).stdout) as { recorded: boolean; path: string };
+  assert.equal(repeated.recorded, false);
+  assert.equal(repeated.path, accepted.path);
+});
+
 test("CLI rejects removed, unknown, missing-value, and command-irrelevant options", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-options-"));
   await runCli("init", "--root", root);
@@ -77,6 +132,11 @@ test("CLI rejects removed, unknown, missing-value, and command-irrelevant option
   await assert.rejects(runCli("memory", "verify", "--json", "--root", root), /not supported/);
   await assert.rejects(runCli("memory", "web", "--port", "70000", "--root", root), /between 1 and 65535/);
   await assert.rejects(runCli("memory", "show", "--bogus", "--root", root), /not supported/);
+  await assert.rejects(runCli("memory", "search", "--root", root), /--query is required/);
+  await assert.rejects(runCli("memory", "search", "--query", "x", "--history=yes", "--root", root), /does not take a value/);
+  await assert.rejects(runCli("memory", "dream", "--root", root), /exactly one of --task, --subject, or --all/);
+  await assert.rejects(runCli("memory", "dream", "--all", "--task", "X", "--root", root), /exactly one/);
+  await assert.rejects(runCli("memory", "dream", "--accept", "../outside.json", "--root", root), /relative to the project|inside the project/);
   await assert.rejects(runCli("context", "--prompt", "x", "--model", "--root", root), /--model requires a value/);
   await assert.rejects(runCli("context", "--prompt", "x", "--prompt", "y", "--root", root), /more than once/);
   await assert.rejects(runCli("context", "--prompt-file", "../outside.md", "--root", root), /stay inside the project/);
@@ -84,11 +144,27 @@ test("CLI rejects removed, unknown, missing-value, and command-irrelevant option
   await assert.rejects(runCli("runtime", "status", "--root", root), /--root is not supported/);
   await assert.rejects(runCli("runtime", "status"), /managed isolated work run/);
   await assert.rejects(runCli("workspaces", "inspect", "--root", root), /--run is required/);
+  await assert.rejects(runCli("configure", "--root", root), /requires an interactive terminal/);
+});
+
+test("memory show reports an intentionally empty configured page catalogue", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-empty-pages-"));
+  await writeFile(path.join(root, "orchbun.yaml"), `version: 1
+memoryPages:
+  enabled: []
+  custom: []
+roadmap:
+  provider: internal
+  path: ROADMAP.md
+`);
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n");
+  assert.equal((await runCli("memory", "show", "--root", root)).stdout.trim(), "No memory pages enabled.");
 });
 
 test("memory compact publishes an accepted manifest from the manual CLI", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-compact-"));
   await writeFile(path.join(root, "orchbun.yaml"), "version: 1\n");
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n");
   const manifestDirectory = path.join(root, "memory", "agents", "milestones", "manual-test");
   await mkdir(manifestDirectory, { recursive: true });
   await writeFile(path.join(manifestDirectory, "approved.yaml"), `schema_version: "1.0"
@@ -125,6 +201,7 @@ supersedes: []
 test("memory compact --all publishes every unpublished accepted manifest once", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-cli-compact-all-"));
   await writeFile(path.join(root, "orchbun.yaml"), "version: 1\n");
+  await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n");
   for (const [milestone, acceptedAt, outcome] of [
     ["first", "2026-08-10T15:00:00Z", "First durable outcome."],
     ["second", "2026-08-10T15:01:00Z", "Second durable outcome."],

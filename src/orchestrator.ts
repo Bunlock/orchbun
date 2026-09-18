@@ -1,7 +1,12 @@
 import path from "node:path";
 import type { OrchbunConfig } from "./config.js";
 import { memoryRoot } from "./config.js";
-import { buildContextPacket } from "./context.js";
+import {
+  buildContextPacket,
+  buildRetrievalCandidatePacket,
+  compareContextPackets,
+  requiredAuthorityMarkers,
+} from "./context.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import { ClaudeAdapter } from "./adapters/claude.js";
 import { OpenRouterAdapter } from "./adapters/openrouter.js";
@@ -9,11 +14,13 @@ import type { AgentAdapter, AdapterResponse } from "./adapters/base.js";
 import { gitSnapshot, snapshotLabel } from "./git.js";
 import { RunJournal } from "./journal.js";
 import { refreshMemory } from "./memory-refresh.js";
-import { completeRoadmapTask } from "./roadmap.js";
 import type { AgentKind, AgentResult, ContextPacket, RunMetadata, RunMode, RunStatus } from "./types.js";
 import { contentHash, newRunId } from "./utils.js";
 import { IsolationManager, RuntimeBroker } from "./isolation.js";
 import type { WorktreeIsolation } from "./types.js";
+import { MemoryService } from "./memory-service.js";
+import { memoryPageCatalogue } from "./memory-pages.js";
+import { createRoadmapStore, RoadmapStoreError } from "./roadmap-store.js";
 
 export interface RunOptions {
   agent: AgentKind;
@@ -59,7 +66,7 @@ export class Orchestrator {
     runtimeAvailable = options.isolation?.runtime.driver === "compose",
   ): Promise<ContextPacket> {
     const memory = await refreshMemory(this.journal, this.root, false);
-    return buildContextPacket(this.root, this.config, {
+    const contextOptions = {
       memoryPages: memory.projection.pages,
       sourcePrompt: options.sourcePrompt,
       taskId: options.taskId,
@@ -67,7 +74,37 @@ export class Orchestrator {
       contextFiles: options.contextFiles,
       allowDelegation: options.mode === "work" && options.depth < this.config.delegation.maxDepth,
       runtimeAvailable,
-    }, workspaceRoot);
+    };
+    const baseline = await buildContextPacket(this.root, this.config, contextOptions, workspaceRoot);
+    try {
+      const service = await MemoryService.open(this.root);
+      if (service.sourceRevision !== memory.projection.sourceRevision) {
+        throw new Error("Memory changed while preparing retrieval context");
+      }
+      const retrievedMemory = service.retrieve({
+        text: options.sourcePrompt,
+        ...(options.taskId ? { taskId: options.taskId } : {}),
+        maxCharacters: this.config.budgets.maxInputChars,
+      });
+      const candidate = await buildRetrievalCandidatePacket(this.root, this.config, {
+        ...contextOptions,
+        retrievedMemory,
+      }, workspaceRoot);
+      return {
+        ...baseline,
+        retrievalComparison: compareContextPackets(
+          baseline,
+          candidate,
+          retrievedMemory.sourceRevision,
+          retrievedMemory.hits.map(hit => hit.citation.id),
+          requiredAuthorityMarkers(this.config),
+        ),
+      };
+    } catch {
+      // Shadow retrieval is disposable. Any ranking or candidate-composition
+      // failure leaves the production five-page packet exactly unchanged.
+      return baseline;
+    }
   }
 
   async run(options: RunOptions): Promise<CompletedRun> {
@@ -79,7 +116,7 @@ export class Orchestrator {
       throw new Error("OpenRouter cannot use work mode because it has no local file tools");
     }
 
-    await this.journal.initialize();
+    await this.journal.initialize(memoryPageCatalogue(this.config));
     const runId = newRunId(options.agent);
     const createsIsolation = !options.isolation && options.mode === "work" && this.config.isolation.enabled;
     // Build and validate context before creating external resources. A fresh
@@ -158,19 +195,38 @@ export class Orchestrator {
         throw new Error(`Agent returned task_id ${String(response.result.task_id)}; expected ${String(options.taskId)}`);
       }
 
-      if (options.mode === "work" && response.result.outcome === "completed" && options.taskId) {
-        const roadmap = await completeRoadmapTask(workspaceRoot, options.taskId);
-        if (roadmap === "updated" && response.result.files_changed.length < 30) {
-          response = {
-            ...response,
-            result: {
-              ...response.result,
-              files_changed: [
-                ...response.result.files_changed,
-                { path: "ROADMAP.md", change: `Marked ${options.taskId} complete after the successful work run.` },
-              ],
-            },
-          };
+      if (options.mode === "work"
+        && response.result.outcome === "completed"
+        && options.taskId
+        && this.config.roadmap.provider === "internal") {
+        try {
+          const store = createRoadmapStore({
+            root: workspaceRoot,
+            memoryRoot: this.journal.memoryRoot,
+            config: this.config.roadmap,
+          });
+          const current = await store.list();
+          if (current.tasks.some((task) => task.id === options.taskId)) {
+            const roadmap = await store.setCompletion({
+              taskId: options.taskId,
+              completed: true,
+              expectedRevision: current.revision,
+            });
+            if (roadmap.completion === "updated" && response.result.files_changed.length < 30) {
+              response = {
+                ...response,
+                result: {
+                  ...response.result,
+                  files_changed: [
+                    ...response.result.files_changed,
+                    { path: this.config.roadmap.path, change: `Marked ${options.taskId} complete after the successful work run.` },
+                  ],
+                },
+              };
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof RoadmapStoreError && ["not_found", "unavailable"].includes(error.code))) throw error;
         }
       }
 

@@ -43,6 +43,16 @@ export interface ContextPacket {
   omittedFiles: string[];
   inputCharacters: number;
   estimatedInputTokens: number;
+  /** Shadow-only comparison. The production expandedPrompt remains the baseline packet. */
+  retrievalComparison?: ContextRetrievalComparison;
+}
+
+export interface ContextRetrievalComparison {
+  sourceRevision: string;
+  baselineCharacters: number;
+  candidateCharacters: number;
+  topCitationIds: string[];
+  mandatoryAuthorityPreserved: boolean;
 }
 
 export interface AgentUsage {

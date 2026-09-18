@@ -13,6 +13,7 @@ This directory stores compact memory notes from agents prompted outside Orchbun.
 - \`Recorded at\` must match the UTC timestamp in the filename, and pairs with \`Agent\`: a note declaring either must carry both. \`Status\` is \`active\` unless explicitly set to \`retired\` or \`superseded\`; retired notes also need a \`Reason\`. Lifecycle markers stay addable to an older note that never recorded its agent.
 - Optionally add \`Supersedes\` with one or more earlier note IDs to retire their current decisions, risks, and next actions without deleting history.
 - Optionally add \`Subjects\` with stable keys such as \`memory/sleep\` to support deterministic, non-semantic grouping.
+- Optionally add \`Sources\` and \`Based on revision\` to retain the source IDs and project-state revision behind a reviewed synthesis.
 - Keep notes factual and compact. Do not place raw transcripts or secrets here.
 - Use \`orchbun memory record --file outcome.md\` to validate, record, and refresh an update. The command fills missing Agent and Recorded at fields; supply Recorded at for retry-safe recording.
 - Optional \`Work status\` is completed, partial, blocked, or cancelled. It describes work, independently of the note lifecycle. Retirement and supersession never establish delivery.
@@ -33,6 +34,8 @@ export interface DirectMemoryNote {
   verification: string[];
   supersedes: string[];
   subjects: string[];
+  sources: string[];
+  basedOnRevision?: string;
   agent?: string;
   recordedAt?: string;
   status: "active" | "retired" | "superseded";
@@ -45,7 +48,7 @@ export interface DirectMemoryLoadResult {
   issues: string[];
 }
 
-type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes" | "subjects" | "workStatus";
+type FieldName = "agent" | "recordedAt" | "task" | "outcome" | "decisions" | "risks" | "nextActions" | "changedFiles" | "verification" | "status" | "reason" | "supersedes" | "subjects" | "sources" | "basedOnRevision" | "workStatus";
 
 const FIELD_NAMES: Record<string, FieldName> = {
   agent: "agent",
@@ -62,6 +65,8 @@ const FIELD_NAMES: Record<string, FieldName> = {
   reason: "reason",
   supersedes: "supersedes",
   subjects: "subjects",
+  sources: "sources",
+  "based on revision": "basedOnRevision",
 };
 const REQUIRED_LABELS = ["task", "outcome", "decisions", "risks or blockers", "next actions", "changed files", "verification"];
 const NOTE_FILE = /^(\d{8}T\d{6}Z)-([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.md$/;
@@ -114,8 +119,16 @@ export async function loadDirectMemory(memoryRoot: string, pending?: { relativeP
     if (recordedAt && recordedAt !== timestamp) issues.push(`${relativePath}: Recorded at must match filename timestamp ${timestamp}`);
     if (!["active", "retired", "superseded"].includes(status)) issues.push(`${relativePath}: Status must be active, retired, or superseded`);
     const reason = parsed.values.reason[0]?.trim();
+    const sources = meaningful(parsed.values.sources);
+    const basedOnRevisionValues = parsed.values.basedOnRevision.map((value) => value.trim()).filter(Boolean);
+    const basedOnRevision = basedOnRevisionValues[0]?.toLowerCase();
+    const invalidSources = parsed.present.has("sources") && !sources.length;
+    const invalidBasedOnRevision = parsed.present.has("based on revision")
+      && (basedOnRevisionValues.length !== 1 || !basedOnRevision || !/^[0-9a-f]{64}$/.test(basedOnRevision));
     if (status === "retired" && !reason) issues.push(`${relativePath}: Reason is required when Status is retired`);
-    if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim() || (hasProvenanceFields && (!agent || !recordedAt)) || (recordedAt && recordedAt !== timestamp) || !["active", "retired", "superseded"].includes(status) || (status === "retired" && !reason)) continue;
+    if (invalidSources) issues.push(`${relativePath}: Sources must contain at least one source ID when present`);
+    if (invalidBasedOnRevision) issues.push(`${relativePath}: Based on revision must be one 64-character hexadecimal revision`);
+    if (missing.length || !parsed.values.task[0]?.trim() || !parsed.values.outcome[0]?.trim() || (hasProvenanceFields && (!agent || !recordedAt)) || (recordedAt && recordedAt !== timestamp) || !["active", "retired", "superseded"].includes(status) || (status === "retired" && !reason) || invalidSources || invalidBasedOnRevision) continue;
 
     notes.push({
       id: fileName.slice(0, -3),
@@ -131,6 +144,8 @@ export async function loadDirectMemory(memoryRoot: string, pending?: { relativeP
       verification: meaningful(parsed.values.verification),
       supersedes: meaningful(parsed.values.supersedes),
       subjects: meaningful(parsed.values.subjects),
+      sources,
+      ...(basedOnRevision ? { basedOnRevision } : {}),
       ...(agent ? { agent } : {}),
       ...(recordedAt ? { recordedAt } : {}),
       status: status as DirectMemoryNote["status"],
@@ -164,6 +179,11 @@ export async function loadDirectMemory(memoryRoot: string, pending?: { relativeP
 
 /** Validate an immutable note before publication; replaying the same explicit timestamp is safe. */
 export async function recordDirectMemory(journal: RunJournal, projectRoot: string, markdown: string, agent = "codex") {
+  return journal.withProjectionLock(() => recordDirectMemoryUnlocked(journal, projectRoot, markdown, agent));
+}
+
+/** Caller holds the projection lock so validation, publication, and refresh stay atomic. */
+export async function recordDirectMemoryUnlocked(journal: RunJournal, projectRoot: string, markdown: string, agent = "codex") {
   if (Buffer.byteLength(markdown, "utf8") > 250_000) throw new Error("Direct note is larger than 250 KB");
   if (!/^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,79}$/.test(agent)) throw new Error("Invalid recording agent");
   const parsed = parseFields(markdown);
@@ -173,26 +193,24 @@ export async function recordDirectMemory(journal: RunJournal, projectRoot: strin
   const text = `${markdown.trimEnd()}${parsed.values.agent.length ? "" : `\n- **Agent:** ${agent}`}${parsed.values.recordedAt.length ? "" : `\n- **Recorded at:** ${timestamp}`}\n`;
   const id = `${compactTimestamp(date)}-${slug(parsed.values.task[0] ?? "note").slice(0, 80).replace(/-$/, "")}-${contentHash(text).slice(0, 8)}`;
   const relativePath = `direct/${id.slice(0, 4)}/${id.slice(4, 6)}/${id}.md`;
-  return journal.withProjectionLock(async () => {
-    const target = path.join(journal.memoryRoot, relativePath);
-    let recorded = false;
-    try {
-      const existing = await readFile(target, "utf8");
-      if (existing !== text) throw new Error("An immutable note already exists with different content");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      assertValidDirectMemory(await loadDirectMemory(journal.memoryRoot, { relativePath, markdown: text }));
-      await mkdir(path.dirname(target), { recursive: true });
-      await writeFile(target, text, { flag: "wx" });
-      recorded = true;
-    }
-    const { refreshMemoryUnlocked } = await import("./memory-refresh.js");
-    try {
-      return { id, path: relativePath, recorded, memory: await refreshMemoryUnlocked(journal, projectRoot) };
-    } catch (error) {
-      throw new Error(`Note saved at ${relativePath}, but refresh failed: ${error instanceof Error ? error.message : String(error)}. Fix the source issue and run memory refresh.`);
-    }
-  });
+  const target = path.join(journal.memoryRoot, relativePath);
+  let recorded = false;
+  try {
+    const existing = await readFile(target, "utf8");
+    if (existing !== text) throw new Error("An immutable note already exists with different content");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    assertValidDirectMemory(await loadDirectMemory(journal.memoryRoot, { relativePath, markdown: text }));
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, text, { flag: "wx" });
+    recorded = true;
+  }
+  const { refreshMemoryUnlocked } = await import("./memory-refresh.js");
+  try {
+    return { id, path: relativePath, recorded, memory: await refreshMemoryUnlocked(journal, projectRoot) };
+  } catch (error) {
+    throw new Error(`Note saved at ${relativePath}, but refresh failed: ${error instanceof Error ? error.message : String(error)}. Fix the source issue and run memory refresh.`);
+  }
 }
 
 export interface DirectMemoryResolution {
@@ -290,7 +308,7 @@ async function markdownFiles(root: string): Promise<string[]> {
 
 function parseFields(text: string): { values: Record<FieldName, string[]>; present: Set<string> } {
   const values: Record<FieldName, string[]> = {
-    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [], subjects: [], workStatus: [],
+    agent: [], recordedAt: [], task: [], outcome: [], decisions: [], risks: [], nextActions: [], changedFiles: [], verification: [], status: [], reason: [], supersedes: [], subjects: [], sources: [], basedOnRevision: [], workStatus: [],
   };
   const present = new Set<string>();
   let current: FieldName | undefined;

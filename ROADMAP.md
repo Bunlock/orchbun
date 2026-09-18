@@ -27,6 +27,12 @@
 - [ ] Complete and verify the Memory 1.0 category rename to Operational constraints.
 - [ ] Upgrade OrchBun from a quick WIP into an MIT-licensed open-source agent management project for solo developers.
 
+### Delivered
+
+- [x] Configurable OrchBun initialization and reconfiguration
+- [x] Finalize in-house OrchBun retrieval and reviewed dreaming.
+- [x] Implement in-house OrchBun retrieval and reviewed dreaming.
+
 ### Retired, superseded, or cancelled records (delivery not established)
 
 - [ ] Rename the OrchBun Memory 1.0 APIs and contracts category to Operational constraints.
