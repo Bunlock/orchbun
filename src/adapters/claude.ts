@@ -5,6 +5,8 @@ import { runProcess } from "./process.js";
 import { loadResultSchema, validateAgentResult } from "../schema.js";
 
 interface ClaudeEnvelope {
+  is_error?: boolean;
+  session_id?: string;
   structured_output?: unknown;
   result?: string;
   total_cost_usd?: number;
@@ -30,6 +32,7 @@ export class ClaudeAdapter implements AgentAdapter {
       JSON.stringify(await loadResultSchema()),
     ];
     if (options.model) args.push("--model", options.model);
+    if (options.resumeSessionId) args.push("--resume", options.resumeSessionId);
     const processResult = await runProcess("claude", args, options.root, options.environment);
     if (processResult.exitCode !== 0) {
       throw new AdapterExecutionError(
@@ -39,6 +42,9 @@ export class ClaudeAdapter implements AgentAdapter {
       );
     }
     const envelope = JSON.parse(processResult.stdout) as ClaudeEnvelope;
+    if (envelope.is_error) {
+      throw new AdapterExecutionError(`Claude reported an error: ${envelope.result ?? "no detail"}`, processResult.stdout, "response.native.json");
+    }
     const candidate = envelope.structured_output ?? (envelope.result ? JSON.parse(envelope.result) : undefined);
     const usage: AgentUsage = {
       ...(envelope.usage?.input_tokens !== undefined ? { inputTokens: envelope.usage.input_tokens } : {}),
@@ -53,6 +59,7 @@ export class ClaudeAdapter implements AgentAdapter {
       ...(processResult.stderr.trim() ? { diagnostics: processResult.stderr } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
       ...(options.model ? { model: options.model } : {}),
+      ...(envelope.session_id ? { sessionId: envelope.session_id } : {}),
     };
   }
 }

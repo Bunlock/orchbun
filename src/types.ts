@@ -1,6 +1,8 @@
 export type AgentKind = "codex" | "claude" | "openrouter";
 export type RunMode = "review" | "work";
-export type RunStatus = "pending" | "completed" | "partial" | "blocked" | "failed" | "interrupted";
+export type RunStatus = "pending" | "running" | "completed" | "partial" | "blocked" | "failed" | "interrupted";
+
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = ["completed", "partial", "blocked", "failed", "interrupted"];
 
 export interface Deliverable {
   type: "file" | "commit" | "url" | "note" | "other";
@@ -104,4 +106,9 @@ export interface RunMetadata {
   gitAfter?: string;
   usage?: AgentUsage;
   isolation?: WorktreeIsolation;
+  /** Provider conversation id reported by the agent, used to send follow-ups. */
+  sessionId?: string;
+  /** For a follow-up: the earlier run whose provider session this run resumes. */
+  resumesRunId?: string;
+  resumeSessionId?: string;
 }

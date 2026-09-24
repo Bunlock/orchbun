@@ -119,6 +119,7 @@ async function latestAcceptedBaseline(memoryRoot: string): Promise<{ milestone: 
 
 function eligibleRun(startedAt: string, status: string, baseline: string, now: Date): boolean {
   if (startedAt >= baseline) return false;
+  if (status === "pending" || status === "running") return false;
   if (status !== "failed") return true;
   const timestamp = Date.parse(startedAt);
   return Number.isFinite(timestamp) && timestamp < now.getTime() - 90 * 24 * 60 * 60 * 1000;

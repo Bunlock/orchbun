@@ -21,6 +21,7 @@ import { MemoryService, type DreamProposal, type DreamScope, type MemorySearchRe
 import { compactAllApprovedMilestones, compactMemory } from "./milestone-memory.js";
 import { sweepMemory } from "./memory-sweep.js";
 import { Orchestrator, type RunOptions } from "./orchestrator.js";
+import { RunControl, type RunView } from "./run-control.js";
 import { renderActiveTasks, sleepMemory } from "./sleep-memory.js";
 import type { AgentKind, RunMode } from "./types.js";
 import { initializeWorkspace } from "./init.js";
@@ -36,7 +37,11 @@ const HELP = `orchbun — local, token-efficient agent orchestration
 Usage:
   orchbun init [--root PATH] [--json]
   orchbun configure [--root PATH]
-  orchbun run --agent AGENT --prompt TEXT [--task ID] [--mode review|work]
+  orchbun run --agent AGENT --prompt TEXT [--task ID] [--mode review|work] [--detach]
+  orchbun runs list [--json]
+  orchbun runs status|cancel --run ID [--json]
+  orchbun runs wait --run ID [--timeout SECONDS] [--json]
+  orchbun runs send --run ID --prompt TEXT [--json]
   orchbun delegate --agent AGENT --prompt TEXT [--mode review|work]
   orchbun context --prompt TEXT [--task ID] [--mode review|work]
   orchbun workspaces list|inspect|cleanup [--run ID] [--json]
@@ -58,6 +63,8 @@ Options:
   --root PATH              Workspace root containing orchbun.yaml
   --json                   Print a machine-readable receipt
   --dry-run                Preview without publishing or invoking an agent
+  --detach                 Start the run in the background and print its id
+  --timeout SECONDS        Stop waiting after this many seconds (exit code 1)
   --history                Include superseded, retired, and archived memory in search
   --out PATH               Write a new editable dream proposal Markdown file
   --accept PATH            Accept an edited dream proposal Markdown file
@@ -408,6 +415,40 @@ async function main(): Promise<void> {
     }
   }
   const orchestrator = new Orchestrator(root, config);
+  if (process.env.ORCHBUN_RUN_ID) assertAllowedInManagedRun(args);
+
+  if (command === "runs") {
+    const control = new RunControl(root, config, orchestrator);
+    const json = args.options.has("json");
+    if (subcommand === "list") {
+      const runs = await control.list();
+      console.log(json ? JSON.stringify(runs, null, 2) : runs.map((run) => `${run.run_id}\t${run.status}\t${run.agent}\t${run.mode}\t${run.task_id ?? "-"}`).join("\n"));
+      return;
+    }
+    const runId = option(args, "run");
+    if (!runId) throw new Error(`--run is required for runs ${subcommand}`);
+    if (subcommand === "execute") {
+      await orchestrator.execute(await orchestrator.load(runId));
+      return;
+    }
+    if (subcommand === "wait") {
+      const timeout = option(args, "timeout");
+      const seconds = timeout === undefined ? undefined : Number(timeout);
+      if (seconds !== undefined && !(Number.isFinite(seconds) && seconds > 0)) throw new Error("--timeout must be a positive number of seconds");
+      const waited = await control.wait([runId], seconds === undefined ? {} : { timeoutMs: seconds * 1_000 });
+      const view = waited.finished[0] ?? waited.running[0]!;
+      console.log(json ? JSON.stringify(view, null, 2) : renderRun(view));
+      if (waited.timed_out) process.exitCode = 1;
+      return;
+    }
+    let view: RunView;
+    if (subcommand === "status") view = await control.status(runId);
+    else if (subcommand === "cancel") view = await control.cancel(runId);
+    else if (subcommand === "send") view = await control.send(runId, await sourcePrompt(args, root));
+    else throw new Error("Usage: orchbun runs list|status|wait|send|cancel [--run ID] [--json]");
+    console.log(json ? JSON.stringify(view, null, 2) : renderRun(view));
+    return;
+  }
 
   if (command === "runtime") {
     if (!subcommand || !["status", "rebuild", "logs"].includes(subcommand)) {
@@ -613,6 +654,13 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.options.has("detach")) {
+    if (isDelegate) throw new Error("--detach is supported only for run");
+    const view = await new RunControl(root, config, orchestrator).start(options);
+    console.log(args.options.has("json") ? JSON.stringify(view, null, 2) : renderRun(view));
+    return;
+  }
+
   const completed = await orchestrator.run(options);
   const receipt = {
     run_id: completed.metadata.runId,
@@ -633,7 +681,36 @@ async function main(): Promise<void> {
   }
 }
 
-const BOOLEAN_OPTIONS = new Set(["help", "json", "dry-run", "all", "history"]);
+function renderRun(view: RunView): string {
+  return [
+    `${view.run_id} → ${view.status}`,
+    ...(view.summary ? [view.summary] : []),
+    ...(view.error ? [view.error] : []),
+    ...(view.workspace ? [`Workspace: ${view.workspace.path} (${view.workspace.branch})`] : []),
+    view.run_directory,
+  ].join("\n");
+}
+
+/**
+ * Managed runs report to an orchestrating session: they do not write shared
+ * memory and do not start or steer other background runs.
+ */
+function assertAllowedInManagedRun(args: ParsedArgs): void {
+  const [command, subcommand] = args.positional;
+  const memoryWrite = command === "memory" && (
+    ["record", "compact", "rebuild"].includes(subcommand ?? "")
+    || (subcommand === "dream" && args.options.has("accept"))
+    || (["sleep", "sweep"].includes(subcommand ?? "") && !args.options.has("dry-run"))
+  );
+  if (memoryWrite) {
+    throw new Error("Managed runs do not write Orchbun memory. Report outcomes in your JSON result; the orchestrating session records them.");
+  }
+  if ((command === "run" && !args.options.has("dry-run")) || (command === "runs" && ["send", "cancel", "execute"].includes(subcommand ?? ""))) {
+    throw new Error("Managed runs cannot start or steer other runs. Use `orchbun delegate` for a bounded subtask.");
+  }
+}
+
+const BOOLEAN_OPTIONS = new Set(["help", "json", "dry-run", "all", "history", "detach"]);
 
 function validateInvocation(args: ParsedArgs): void {
   const [command, subcommand, ...extra] = args.positional;
@@ -642,7 +719,8 @@ function validateInvocation(args: ParsedArgs): void {
   if (command === "init" && !subcommand) allowed = ["root", "json"];
   else if (command === "configure" && !subcommand) allowed = ["root"];
   else if (["run", "delegate", "context"].includes(command ?? "") && !subcommand) {
-    allowed = ["agent", "prompt", "prompt-file", "task", "mode", "context", "model", "root", "json", ...(command === "context" ? [] : ["dry-run"] )];
+    allowed = ["agent", "prompt", "prompt-file", "task", "mode", "context", "model", "root", "json", ...(command === "context" ? [] : ["dry-run"]), ...(command === "run" ? ["detach"] : [])];
+    if (args.options.has("detach") && args.options.has("dry-run")) throw new Error("Use either --detach or --dry-run, not both");
   } else if (command === "memory" && subcommand) {
     const memoryOptions: Record<string, string[]> = {
       refresh: ["root", "dry-run", "json"], record: ["root", "file", "agent", "json"],
@@ -658,6 +736,12 @@ function validateInvocation(args: ParsedArgs): void {
       list: ["root", "json"], inspect: ["root", "run", "json"], cleanup: ["root", "run", "json"],
     };
     allowed = workspaceOptions[subcommand] ?? [];
+  } else if (command === "runs" && subcommand) {
+    const runOptions: Record<string, string[]> = {
+      list: ["root", "json"], status: ["root", "run", "json"], cancel: ["root", "run", "json"],
+      wait: ["root", "run", "timeout", "json"], send: ["root", "run", "prompt", "prompt-file", "json"], execute: ["root", "run"],
+    };
+    allowed = runOptions[subcommand] ?? [];
   } else if (command === "runtime" && subcommand) {
     allowed = [];
   } else throw new Error(`Unknown command.\n\n${HELP}`);

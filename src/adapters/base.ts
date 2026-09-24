@@ -8,6 +8,8 @@ export interface AdapterOptions {
   environment: NodeJS.ProcessEnv;
   model?: string;
   maxOutputTokens: number;
+  /** Continue this provider session instead of starting a new one. */
+  resumeSessionId?: string;
 }
 
 export interface AdapterResponse {
@@ -17,6 +19,7 @@ export interface AdapterResponse {
   diagnostics?: string;
   usage?: AgentUsage;
   model?: string;
+  sessionId?: string;
 }
 
 export class AdapterExecutionError extends Error {

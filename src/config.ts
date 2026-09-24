@@ -70,6 +70,8 @@ export interface OrchbunConfig {
   delegation: {
     maxDepth: number;
     defaultMode: RunMode;
+    /** Background runs allowed at once for an orchestrating session. */
+    maxConcurrent: number;
   };
   images: {
     pollIntervalMs: number;
@@ -125,6 +127,7 @@ export const DEFAULT_CONFIG: OrchbunConfig = {
   delegation: {
     maxDepth: 2,
     defaultMode: "review",
+    maxConcurrent: 4,
   },
   images: {
     pollIntervalMs: 2_000,
@@ -304,6 +307,7 @@ function resolveConfig(parsed: Record<string, unknown>, legacyRoadmapPath?: stri
       ...delegation,
       maxDepth: integerSetting(delegation, "maxDepth", "delegation.maxDepth", DEFAULT_CONFIG.delegation.maxDepth, 0),
       defaultMode: enumSetting(delegation, "defaultMode", "delegation.defaultMode", DEFAULT_CONFIG.delegation.defaultMode, ["review", "work"] as const),
+      maxConcurrent: integerSetting(delegation, "maxConcurrent", "delegation.maxConcurrent", DEFAULT_CONFIG.delegation.maxConcurrent, 1),
     },
     images: {
       ...DEFAULT_CONFIG.images,

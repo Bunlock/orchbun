@@ -13,13 +13,14 @@ export class CodexAdapter implements AgentAdapter {
   async execute(packet: ContextPacket, options: AdapterOptions): Promise<AdapterResponse> {
     await mkdir(options.temporaryDir, { recursive: true });
     const outputPath = path.join(options.temporaryDir, `${newRunId("codex-result")}.json`);
+    const sandbox = options.mode === "review" ? "read-only" : "workspace-write";
+    // `exec resume` has no --sandbox flag; the equivalent config override keeps the same policy.
     const args = [
-      "exec",
-      packet.expandedPrompt,
+      ...(options.resumeSessionId
+        ? ["exec", "resume", options.resumeSessionId, packet.expandedPrompt, "-c", `sandbox_mode="${sandbox}"`]
+        : ["exec", packet.expandedPrompt, "--sandbox", sandbox]),
       "--skip-git-repo-check",
       "--json",
-      "--sandbox",
-      options.mode === "review" ? "read-only" : "workspace-write",
       "--output-schema",
       bundledSchemaPath(),
       "-o",
@@ -43,11 +44,25 @@ export class CodexAdapter implements AgentAdapter {
         ...(processResult.stderr.trim() ? { diagnostics: processResult.stderr } : {}),
         ...(extractCodexUsage(processResult.stdout) ? { usage: extractCodexUsage(processResult.stdout)! } : {}),
         ...(options.model ? { model: options.model } : {}),
+        ...(extractCodexThreadId(processResult.stdout) ? { sessionId: extractCodexThreadId(processResult.stdout)! } : {}),
       };
     } finally {
       await rm(outputPath, { force: true });
     }
   }
+}
+
+function extractCodexThreadId(jsonl: string): string | undefined {
+  for (const line of jsonl.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { type?: string; thread_id?: unknown };
+      if (event.type === "thread.started" && typeof event.thread_id === "string") return event.thread_id;
+    } catch {
+      // Unknown native lines are preserved but ignored.
+    }
+  }
+  return undefined;
 }
 
 function extractCodexUsage(jsonl: string): AgentUsage | undefined {

@@ -8,6 +8,8 @@ import { findWorkspaceRoot, loadConfig, memoryRoot } from "./config.js";
 import { ImageGenerationJournal } from "./image-generation/journal.js";
 import { LeonardoProvider } from "./image-generation/leonardo.js";
 import { ImageGenerationService } from "./image-generation/service.js";
+import { Orchestrator } from "./orchestrator.js";
+import { RunControl } from "./run-control.js";
 
 const referenceSchema = z.object({
   id: z.string().min(1),
@@ -69,14 +71,29 @@ export function createImageToolHandler(
   };
 }
 
-export function createImageMcpServer(
+export interface McpServices {
+  images?: { service: ImageGenerationService; defaults: { pollIntervalMs: number; timeoutMs: number } };
+  runs?: RunControl;
+}
+
+export function createMcpServer(services: McpServices): McpServer {
+  const server = new McpServer(
+    { name: "orchbun", version: "0.3.0" },
+    { instructions: [
+      ...(services.runs ? [RUN_INSTRUCTIONS] : []),
+      ...(services.images ? ["Use generate_image for traceable image generation. Only the official Leonardo integration is supported."] : []),
+    ].join("\n\n") },
+  );
+  if (services.images) registerImageTools(server, services.images.service, services.images.defaults);
+  if (services.runs) registerRunTools(server, services.runs);
+  return server;
+}
+
+function registerImageTools(
+  server: McpServer,
   service: ImageGenerationService,
   defaults: { pollIntervalMs: number; timeoutMs: number },
-): McpServer {
-  const server = new McpServer(
-    { name: "orchbun-images", version: "0.2.0" },
-    { instructions: "Use generate_image for traceable image generation. Only the official Leonardo integration is supported." },
-  );
+): void {
   const generateImage = createImageToolHandler(service, defaults);
   server.registerTool("generate_image", {
     title: "Generate image",
@@ -127,18 +144,91 @@ export function createImageMcpServer(
       };
     }
   });
-  return server;
+}
+
+const RUN_INSTRUCTIONS = "Orchestrate Codex and Claude Code agents as background runs. agent_start returns a run id at once; "
+  + "use agent_wait to block until a run finishes (it returns early when timeout_seconds elapses — call it again), "
+  + "agent_status to inspect runs, agent_send to continue a finished run's session in the same workspace, and agent_cancel to stop one. "
+  + "Work runs edit an isolated git worktree reported as `workspace`; review and merge it yourself. "
+  + "Agents report outcomes in their result and never write Orchbun memory: you record durable outcomes and run end-to-end verification.";
+
+const runIdSchema = z.string().regex(/^\d{8}T\d{6}Z-[a-z]+-[0-9a-f]{6}$/, "Expected an Orchbun run id");
+
+function registerRunTools(server: McpServer, runs: RunControl): void {
+  const respond = async (action: () => Promise<unknown>) => {
+    try {
+      const value = await action();
+      return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }], structuredContent: { value } };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }] };
+    }
+  };
+  server.registerTool("agent_start", {
+    title: "Start agent run",
+    description: "Start a Codex, Claude, or OpenRouter agent in the background with Orchbun context. Review mode is read-only; work mode edits an isolated worktree. Returns the run immediately.",
+    inputSchema: z.object({
+      agent: z.enum(["codex", "claude", "openrouter"]),
+      prompt: z.string().trim().min(1),
+      mode: z.enum(["review", "work"]).optional().default("review"),
+      task_id: z.string().trim().min(1).max(80).optional(),
+      model: z.string().trim().min(1).optional(),
+      context_files: z.array(z.string().min(1)).max(20).optional().default([]),
+    }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (input) => respond(() => runs.start({
+    agent: input.agent,
+    mode: input.mode,
+    sourcePrompt: input.prompt,
+    taskId: input.task_id ?? null,
+    parentRunId: null,
+    depth: 0,
+    contextFiles: input.context_files,
+    ...(input.model ? { model: input.model } : {}),
+  })));
+  server.registerTool("agent_send", {
+    title: "Send follow-up",
+    description: "Continue a finished run's agent session with a follow-up prompt, in the same workspace and mode. Returns the new run immediately.",
+    inputSchema: z.object({ run_id: runIdSchema, prompt: z.string().trim().min(1) }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async ({ run_id, prompt }) => respond(() => runs.send(run_id, prompt)));
+  server.registerTool("agent_status", {
+    title: "Agent run status",
+    description: "Return one run with its full result, or the 20 most recent runs when run_id is omitted.",
+    inputSchema: z.object({ run_id: runIdSchema.optional() }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ run_id }) => respond(() => run_id ? runs.status(run_id) : runs.list()));
+  server.registerTool("agent_wait", {
+    title: "Wait for agent runs",
+    description: "Block until any run (or all runs, with all: true) finishes, or until timeout_seconds elapses. Finished runs include their full result.",
+    inputSchema: z.object({
+      run_ids: z.array(runIdSchema).min(1).max(20),
+      all: z.boolean().optional().default(false),
+      timeout_seconds: z.number().int().min(1).max(3_600).optional().default(50),
+    }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ run_ids, all, timeout_seconds }) =>
+    respond(() => runs.wait(run_ids, { all, timeoutMs: timeout_seconds * 1_000 })));
+  server.registerTool("agent_cancel", {
+    title: "Cancel agent run",
+    description: "Stop a background run and its agent process. Its workspace is kept for inspection.",
+    inputSchema: z.object({ run_id: runIdSchema }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  }, async ({ run_id }) => respond(() => runs.cancel(run_id)));
 }
 
 async function main(): Promise<void> {
   const root = await findWorkspaceRoot(path.resolve(process.env.ORCHBUN_ROOT ?? process.cwd()));
   const config = await loadConfig(root);
+  const runs = new RunControl(root, config, new Orchestrator(root, config));
+  // Image tools are offered only when their provider credential is configured.
   const apiKey = process.env.LEONARDO_API_KEY;
-  if (!apiKey) throw new Error("LEONARDO_API_KEY is required to start the Leonardo image provider");
-  const journal = new ImageGenerationJournal(memoryRoot(root, config));
-  await journal.initialize();
-  const service = new ImageGenerationService([new LeonardoProvider({ apiKey })], journal);
-  serveStdio(() => createImageMcpServer(service, config.images), {
+  let images: McpServices["images"];
+  if (apiKey) {
+    const journal = new ImageGenerationJournal(memoryRoot(root, config));
+    await journal.initialize();
+    images = { service: new ImageGenerationService([new LeonardoProvider({ apiKey })], journal), defaults: config.images };
+  }
+  serveStdio(() => createMcpServer({ runs, ...(images ? { images } : {}) }), {
     onerror: (error) => console.error(error.message),
   });
 }

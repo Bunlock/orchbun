@@ -20,13 +20,8 @@
     "verification"
   ],
   "properties": {
-    "schema_version": { "const": "2.0" },
-    "task_id": {
-      "oneOf": [
-        { "type": "string", "minLength": 1, "maxLength": 80 },
-        { "type": "null" }
-      ]
-    },
+    "schema_version": { "type": "string", "enum": ["2.0"] },
+    "task_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
     "prompt_intent": { "type": "string", "minLength": 1, "maxLength": 400 },
     "outcome": { "enum": ["completed", "partial", "blocked", "failed"] },
     "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },

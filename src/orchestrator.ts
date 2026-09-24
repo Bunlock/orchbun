@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { OrchbunConfig } from "./config.js";
 import { memoryRoot } from "./config.js";
@@ -15,7 +16,7 @@ import { gitSnapshot, snapshotLabel } from "./git.js";
 import { RunJournal } from "./journal.js";
 import { refreshMemory } from "./memory-refresh.js";
 import type { AgentKind, AgentResult, ContextPacket, RunMetadata, RunMode, RunStatus } from "./types.js";
-import { contentHash, newRunId } from "./utils.js";
+import { contentHash, estimateTokens, newRunId } from "./utils.js";
 import { IsolationManager, RuntimeBroker } from "./isolation.js";
 import type { WorktreeIsolation } from "./types.js";
 import { MemoryService } from "./memory-service.js";
@@ -32,6 +33,14 @@ export interface RunOptions {
   contextFiles: string[];
   model?: string;
   isolation?: WorktreeIsolation;
+  /** Continue an earlier run's provider session with a bare follow-up prompt. */
+  resume?: { runId: string; sessionId: string };
+}
+
+export interface PreparedRun {
+  metadata: RunMetadata;
+  packet: ContextPacket;
+  runDirectory: string;
 }
 
 export interface CompletedRun {
@@ -108,6 +117,14 @@ export class Orchestrator {
   }
 
   async run(options: RunOptions): Promise<CompletedRun> {
+    return this.execute(await this.prepare(options));
+  }
+
+  /**
+   * Validates the request, provisions isolation, and records a pending run.
+   * Everything that can reject a request happens here, before any agent starts.
+   */
+  async prepare(options: RunOptions): Promise<PreparedRun> {
     if (options.depth > this.config.delegation.maxDepth) {
       throw new Error(`Delegation depth ${options.depth} exceeds maximum ${this.config.delegation.maxDepth}`);
     }
@@ -118,7 +135,7 @@ export class Orchestrator {
 
     await this.journal.initialize(memoryPageCatalogue(this.config));
     const runId = newRunId(options.agent);
-    const createsIsolation = !options.isolation && options.mode === "work" && this.config.isolation.enabled;
+    const createsIsolation = !options.isolation && !options.resume && options.mode === "work" && this.config.isolation.enabled;
     // Build and validate context before creating external resources. A fresh
     // worktree is rooted at the same clean tracked HEAD, so the packet remains
     // exact while avoiding orphaned worktrees for invalid context requests.
@@ -131,8 +148,9 @@ export class Orchestrator {
         : undefined
     );
     const workspaceRoot = isolation?.workspaceRoot ?? this.root;
-    const packet = preparedPacket ?? await this.context({ ...options, ...(isolation ? { isolation } : {}) }, workspaceRoot);
-    const before = await gitSnapshot(workspaceRoot);
+    const packet = options.resume
+      ? followUpPacket(options.sourcePrompt, options.taskId)
+      : preparedPacket ?? await this.context({ ...options, ...(isolation ? { isolation } : {}) }, workspaceRoot);
     const model = options.model ?? (options.agent === "openrouter" ? this.config.agents.openrouterModel : undefined);
     const metadata: RunMetadata = {
       runId,
@@ -150,18 +168,56 @@ export class Orchestrator {
       estimatedInputTokens: packet.estimatedInputTokens,
       includedFiles: packet.includedFiles,
       omittedFiles: packet.omittedFiles,
-      gitBefore: snapshotLabel(before),
+      gitBefore: snapshotLabel(await gitSnapshot(workspaceRoot)),
       ...(isolation ? { isolation } : {}),
+      ...(options.resume ? { resumesRunId: options.resume.runId, resumeSessionId: options.resume.sessionId } : {}),
     };
     const runDirectory = await this.journal.begin(metadata, packet);
+    return { metadata, packet, runDirectory };
+  }
 
+  /** Reloads a pending run recorded by prepare, for execution in another process. */
+  async load(runId: string): Promise<PreparedRun> {
+    const runDirectory = this.runDirectory(runId);
+    const metadata = await this.journal.readMetadata(runDirectory);
+    if (metadata.status !== "pending") throw new Error(`Run ${runId} is ${metadata.status}; only a pending run can be executed`);
+    const [sourcePrompt, expandedPrompt] = await Promise.all([
+      readFile(path.join(runDirectory, "prompt.md"), "utf8"),
+      readFile(path.join(runDirectory, "prompt.expanded.md"), "utf8"),
+    ]);
+    return {
+      metadata,
+      runDirectory,
+      packet: {
+        taskId: metadata.taskId,
+        sourcePrompt,
+        expandedPrompt,
+        includedFiles: metadata.includedFiles,
+        omittedFiles: metadata.omittedFiles,
+        inputCharacters: metadata.inputCharacters,
+        estimatedInputTokens: metadata.estimatedInputTokens,
+      },
+    };
+  }
+
+  /** Resolves a run id to its journal directory, rejecting ids that could escape it. */
+  runDirectory(runId: string): string {
+    if (!/^\d{8}T\d{6}Z-[a-z]+-[0-9a-f]{6}$/.test(runId)) throw new Error(`Invalid run id: ${runId}`);
+    return this.journal.runDirectory(runId);
+  }
+
+  async execute(prepared: PreparedRun): Promise<CompletedRun> {
+    const { metadata, packet, runDirectory } = prepared;
+    const { runId, isolation } = metadata;
+    const workspaceRoot = isolation?.workspaceRoot ?? this.root;
+    const before = await gitSnapshot(workspaceRoot);
     const environment: NodeJS.ProcessEnv = {
-      ...process.env,
+      ...managedEnvironment(),
       ORCHBUN_ROOT: this.root,
       ORCHBUN_RUN_ID: runId,
-      ORCHBUN_TASK_ID: options.taskId ?? "",
-      ORCHBUN_DEPTH: String(options.depth),
-      ORCHBUN_MODE: options.mode,
+      ORCHBUN_TASK_ID: metadata.taskId ?? "",
+      ORCHBUN_DEPTH: String(metadata.depth),
+      ORCHBUN_MODE: metadata.mode,
       ...(isolation ? {
         ...this.isolation.environment(isolation),
         ORCHBUN_BASE_COMMIT: isolation.baseCommit,
@@ -174,6 +230,8 @@ export class Orchestrator {
     let resultRecorded = false;
 
     try {
+      metadata.status = "running";
+      await this.journal.markRunning(runDirectory, metadata);
       if (isolation) await this.isolation.markRunning(isolation);
       if (isolation?.runtime.driver === "compose" && isolation.runtime.state === "ready") {
         broker = new RuntimeBroker(this.isolation, isolation);
@@ -182,22 +240,25 @@ export class Orchestrator {
         environment.ORCHBUN_RUNTIME_TOKEN = access.token;
         environment.DOCKER_HOST = "unix:///nonexistent/orchbun-managed-docker.sock";
       }
-      let response = await this.adapters[options.agent].execute(packet, {
+      let response = await this.adapters[metadata.agent].execute(packet, {
         controlRoot: this.root,
         root: workspaceRoot,
         temporaryDir: path.join(this.journal.memoryRoot, "tmp"),
-        mode: options.mode,
+        mode: metadata.mode,
         environment,
         maxOutputTokens: this.config.budgets.maxOutputTokens,
-        ...(model ? { model } : {}),
+        ...(metadata.model ? { model: metadata.model } : {}),
+        ...(metadata.resumeSessionId ? { resumeSessionId: metadata.resumeSessionId } : {}),
       });
-      if (response.result.task_id !== options.taskId) {
-        throw new Error(`Agent returned task_id ${String(response.result.task_id)}; expected ${String(options.taskId)}`);
+      const sessionId = response.sessionId ?? metadata.resumeSessionId;
+      if (sessionId) metadata.sessionId = sessionId;
+      if (response.result.task_id !== metadata.taskId) {
+        throw new Error(`Agent returned task_id ${String(response.result.task_id)}; expected ${String(metadata.taskId)}`);
       }
 
-      if (options.mode === "work"
+      if (metadata.mode === "work"
         && response.result.outcome === "completed"
-        && options.taskId
+        && metadata.taskId
         && this.config.roadmap.provider === "internal") {
         try {
           const store = createRoadmapStore({
@@ -206,9 +267,9 @@ export class Orchestrator {
             config: this.config.roadmap,
           });
           const current = await store.list();
-          if (current.tasks.some((task) => task.id === options.taskId)) {
+          if (current.tasks.some((task) => task.id === metadata.taskId)) {
             const roadmap = await store.setCompletion({
-              taskId: options.taskId,
+              taskId: metadata.taskId,
               completed: true,
               expectedRevision: current.revision,
             });
@@ -219,7 +280,7 @@ export class Orchestrator {
                   ...response.result,
                   files_changed: [
                     ...response.result.files_changed,
-                    { path: this.config.roadmap.path, change: `Marked ${options.taskId} complete after the successful work run.` },
+                    { path: this.config.roadmap.path, change: `Marked ${metadata.taskId} complete after the successful work run.` },
                   ],
                 },
               };
@@ -231,7 +292,7 @@ export class Orchestrator {
       }
 
       const after = await gitSnapshot(workspaceRoot);
-      if (options.mode === "review" && before.fingerprint !== after.fingerprint) {
+      if (metadata.mode === "review" && before.fingerprint !== after.fingerprint) {
         response = reviewViolation(response);
       }
       metadata.status = statusFor(response.result);
@@ -257,6 +318,40 @@ export class Orchestrator {
       throw error;
     }
   }
+}
+
+// Identity of an interactive Claude Code host. A child agent CLI must start its
+// own session rather than attach to, or impersonate, the orchestrating one.
+const HOST_SESSION_VARIABLES = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_HOST_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_PID",
+];
+
+function managedEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const name of HOST_SESSION_VARIABLES) delete environment[name];
+  return environment;
+}
+
+function followUpPacket(sourcePrompt: string, taskId: string | null): ContextPacket {
+  const expandedPrompt = `[FOLLOW-UP]\n${taskId ? `TASK: ${taskId}\n` : ""}${sourcePrompt}\n\n`
+    + "The rules from the first message of this session still apply. Return only one JSON object matching the supplied schema.";
+  return {
+    taskId,
+    sourcePrompt,
+    expandedPrompt,
+    includedFiles: [],
+    omittedFiles: [],
+    inputCharacters: expandedPrompt.length,
+    estimatedInputTokens: estimateTokens(expandedPrompt),
+  };
 }
 
 function statusFor(result: AgentResult): RunStatus {

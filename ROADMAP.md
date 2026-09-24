@@ -15,6 +15,13 @@
 - [x] **ORCH-B4** Managed work-run isolation pilot: provision retained Git worktrees, inherit them across delegates, allocate optional Compose endpoints, mediate bounded runtime commands, and safely clean up only merged work.
 - [x] **ORCH-B5** Keep project state current through a shared refresh calculation, immutable outcome recording, preserved human annotations, revision-checked web edits, read-only context preparation, and recoverable publication. Evidence: 62 tests passed, package build passed, and browser refresh/conflict/review/save workflow verified.
 
+## C — Multi-agent orchestration
+
+- [x] **ORCH-C1** Background runs: `run --detach` prepares and records the run, then a detached worker executes it; `runs list|status|wait|cancel`, `delegation.maxConcurrent`, and dead-worker reconciliation to `interrupted`.
+- [x] **ORCH-C2** Follow-ups: record each Codex thread and Claude session id and continue it with `runs send` in the same worktree and mode.
+- [x] **ORCH-C3** Master tools: `agent_start`, `agent_send`, `agent_status`, `agent_wait`, and `agent_cancel` on `orchbun-mcp`, usable from Claude Code and Codex masters.
+- [x] **ORCH-C4** Managed-run role: children report only through their result, never write memory or start other runs, and verify with unit tests when no managed runtime exists.
+
 ## Phase P — Product work tracked in direct notes
 
 <!-- orchbun:phase-p:start -->

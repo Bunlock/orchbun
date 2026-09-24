@@ -96,11 +96,16 @@ export class RunJournal {
     ]);
   }
 
+  async markRunning(directory: string, metadata: RunMetadata): Promise<void> {
+    return this.withProjectionLock(() => this.writeMetadata(directory, metadata));
+  }
+
   async fail(directory: string, metadata: RunMetadata, error: unknown): Promise<void> {
     return this.withProjectionLock(() => this.failUnlocked(directory, metadata, error));
   }
 
-  private async failUnlocked(directory: string, metadata: RunMetadata, error: unknown): Promise<void> {
+  /** Records a failed or interrupted run; the caller must hold the projection lock. */
+  async failUnlocked(directory: string, metadata: RunMetadata, error: unknown): Promise<void> {
     const message = error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error);
     const native = error as { nativeOutput?: unknown; nativeFileName?: unknown };
     await Promise.all([
@@ -242,6 +247,9 @@ function toSnakeCaseMetadata(metadata: RunMetadata): Record<string, unknown> {
         state: metadata.isolation.runtime.state,
       },
     } } : {}),
+    ...(metadata.sessionId ? { session_id: metadata.sessionId } : {}),
+    ...(metadata.resumesRunId ? { resumes_run_id: metadata.resumesRunId } : {}),
+    ...(metadata.resumeSessionId ? { resume_session_id: metadata.resumeSessionId } : {}),
     ...(metadata.usage ? { usage: {
       input_tokens: metadata.usage.inputTokens,
       output_tokens: metadata.usage.outputTokens,
@@ -273,6 +281,9 @@ export function metadataFromYaml(value: Record<string, unknown>): RunMetadata {
     omittedFiles: (value.omitted_files as string[] | undefined) ?? [],
     ...(value.git_before ? { gitBefore: String(value.git_before) } : {}),
     ...(value.git_after ? { gitAfter: String(value.git_after) } : {}),
+    ...(value.session_id ? { sessionId: String(value.session_id) } : {}),
+    ...(value.resumes_run_id ? { resumesRunId: String(value.resumes_run_id) } : {}),
+    ...(value.resume_session_id ? { resumeSessionId: String(value.resume_session_id) } : {}),
     ...(usage ? { usage: {
       ...(usage.input_tokens !== undefined ? { inputTokens: usage.input_tokens } : {}),
       ...(usage.output_tokens !== undefined ? { outputTokens: usage.output_tokens } : {}),

@@ -319,7 +319,12 @@ OrchBun rejects unknown options and options that do not apply to the selected co
 | `orchbun init` | Initialize config, versioned master files, and ignored local memory | `--root`, `--json` |
 | `orchbun configure` | Interactively review and change memory-page and roadmap setup | `--root` |
 | `orchbun context` | Print the exact bounded context without invoking an agent | run options, `--json` |
-| `orchbun run` | Run an agent; review mode is the default | `--agent`, `--prompt`/`--prompt-file`, `--task`, `--mode`, `--context`, `--model`, `--dry-run`, `--json`, `--root` |
+| `orchbun run` | Run an agent; review mode is the default | `--agent`, `--prompt`/`--prompt-file`, `--task`, `--mode`, `--context`, `--model`, `--dry-run`, `--detach`, `--json`, `--root` |
+| `orchbun runs list` | List the 20 most recent runs with their status | `--json`, `--root` |
+| `orchbun runs status` | Show one run, including its result once finished | `--run`, `--json`, `--root` |
+| `orchbun runs wait` | Block until a background run finishes; exit code 1 on timeout | `--run`, `--timeout`, `--json`, `--root` |
+| `orchbun runs send` | Continue a finished run's agent session in the background | `--run`, `--prompt`/`--prompt-file`, `--json`, `--root` |
+| `orchbun runs cancel` | Stop a background run and its agent process | `--run`, `--json`, `--root` |
 | `orchbun delegate` | Run a bounded child from a managed work-mode parent | run options |
 | `orchbun workspaces list` | List retained managed worktree leases | `--json`, `--root` |
 | `orchbun workspaces inspect` | Inspect one worktree/runtime lease | `--run`, `--json`, `--root` |
@@ -365,6 +370,50 @@ hooks:
 ```
 
 The command runs through the system shell with the project root as its working directory. A non-zero exit makes the rebuild fail, so hook commands should be trusted, deterministic project tooling.
+
+## Orchestrating agents from a master session
+
+Any interactive Claude Code or Codex session can act as a master that starts, follows, and steers other Codex and Claude runs. You keep talking to the master as usual; the other agents run headless in the background and report back to it.
+
+- `orchbun run --detach` (or the `agent_start` MCP tool) validates the request, prepares its context and worktree, records the run, and returns its id immediately. A detached worker process then runs the agent.
+- `orchbun runs wait --run <id>` blocks until that run finishes and prints its summary. A Claude Code master runs it as a background command and is woken when it exits. A Codex master calls `agent_wait`, which returns early after `timeout_seconds` (default 50) so it stays under MCP tool timeouts.
+- `orchbun runs send --run <id>` (or `agent_send`) continues a finished run's Codex thread or Claude session, in the same worktree and mode, with a short follow-up prompt.
+- `orchbun runs cancel --run <id>` (or `agent_cancel`) stops the worker and its agent process group. The run is recorded as `interrupted` and its worktree is kept. A worker that dies without recording a result is also reported as `interrupted`.
+
+Roles are split deliberately:
+
+- **Master:** records durable memory, runs end-to-end verification, reviews and merges each worktree, and commits.
+- **Managed runs:** report outcomes, decisions, risks, and verification only in their JSON result. When no Orchbun-managed runtime is configured, they verify with unit tests only and do not start dev servers, browsers, end-to-end suites, or Docker. Inside a managed run, `memory record`, `compact`, `rebuild`, `dream --accept`, publishing `sleep`/`sweep`, `run`, and `runs send|cancel` are refused; read-only commands and `delegate` still work.
+
+Background work runs require `isolation.enabled: true`, so parallel agents never share a checkout. Worktrees start from the clean tracked `HEAD`, so commit or stash master changes that the agents need to see. `delegation.maxConcurrent` (default 4) caps active background runs:
+
+```yaml
+delegation:
+  maxConcurrent: 4
+isolation:
+  enabled: true
+```
+
+Register the MCP server once per master client. For Claude Code, add it to the project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "orchbun": { "command": "orchbun-mcp", "env": { "ORCHBUN_ROOT": "/absolute/path/to/project" } }
+  }
+}
+```
+
+For Codex, add it to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.orchbun]
+command = "orchbun-mcp"
+env = { ORCHBUN_ROOT = "/absolute/path/to/project" }
+tool_timeout_sec = 120
+```
+
+Headless children use each CLI's own login: run `claude` or `codex login` in a terminal once if a child reports an authentication error.
 
 ## Managed work-run isolation
 
@@ -472,12 +521,12 @@ Compaction archives the prior working tree with its manifest and publication rec
 
 ## Provider-neutral image generation
 
-The `orchbun-mcp` executable exposes `generate_image` and `get_image_generation`. Leonardo is the currently implemented adapter. `LEONARDO_API_KEY` is read only from the environment and is never written to memory.
+The `orchbun-mcp` executable also exposes `generate_image` and `get_image_generation` when `LEONARDO_API_KEY` is set. Leonardo is the currently implemented adapter. `LEONARDO_API_KEY` is read only from the environment and is never written to memory.
 
 ```json
 {
   "mcpServers": {
-    "orchbun-images": {
+    "orchbun": {
       "command": "orchbun-mcp",
       "env": {
         "ORCHBUN_ROOT": "/absolute/path/to/project",

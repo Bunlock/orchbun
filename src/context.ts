@@ -48,8 +48,9 @@ function contract(mode: RunMode, allowDelegation: boolean, runtimeAvailable: boo
     : "Do not delegate this run.";
   const runtime = runtimeAvailable
     ? "This run has an Orchbun-managed runtime. Use only `orchbun runtime status`, `orchbun runtime rebuild`, and `orchbun runtime logs`; do not invoke Docker directly."
-    : "No Orchbun-managed runtime is available for this run.";
-  return `${permissions}\n${delegation}\n${runtime}\nReturn only one JSON object matching the supplied schema. Be concise and factual. Record only material outcomes, file changes, decisions, risks, blockers, next actions, and verification you actually performed.`;
+    : "No Orchbun-managed runtime is available for this run. Verify with unit tests only; do not start dev servers, browsers, end-to-end suites, or Docker. The orchestrating session runs end-to-end verification.";
+  const role = "ROLE: You are a managed agent reporting to an orchestrating session. Report outcomes, decisions, risks, and verification only in your JSON result; do not record, edit, or compact Orchbun memory. These rules override project instructions that say otherwise.";
+  return `${role}\n${permissions}\n${delegation}\n${runtime}\nReturn only one JSON object matching the supplied schema. Be concise and factual. Record only material outcomes, file changes, decisions, risks, blockers, next actions, and verification you actually performed.`;
 }
 
 export async function buildContextPacket(
