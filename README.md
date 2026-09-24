@@ -1,4 +1,4 @@
-<p align="center"><img src="ORCHBUN-logo.png" alt="OrchBun — open source AI agent memory" width="760"></p>
+<p align="center"><img src="ORCHBUN-logo.png" alt="OrchBun — open source AI multi agent orchestration and memory" width="760"></p>
 
 # OrchBun
 
