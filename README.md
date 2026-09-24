@@ -2,13 +2,15 @@
 
 # OrchBun
 
-OrchBun is a local-first agent manager for solo developers. It runs Codex, Claude Code, and OpenRouter agents with bounded context, records auditable results, maintains compact project memory, and provides a small local web workspace for everyday memory and roadmap work.
+OrchBun is a local-first agent manager for solo developers. It runs Codex, Claude Code, and OpenRouter agents with bounded context, lets one interactive Claude Code or Codex session orchestrate the others in the background, records auditable results, maintains compact project memory, and provides a small local web workspace for everyday memory and roadmap work.
 
 The memory server binds to `127.0.0.1`. Project memory remains in the project, is ignored by Git by default, and is never uploaded by OrchBun itself.
 
 ## What 1.0 includes
 
 - Review-first agent runs with explicit work mode and bounded delegation.
+- Master-session orchestration: background runs, wait, follow-ups in the same agent session, and cancellation, from the CLI or the `orchbun-mcp` agent tools.
+- A managed-run role: agents report through a validated JSON result, while the master alone records memory and runs end-to-end verification.
 - Optional managed work-run isolation with retained Git worktrees and narrowly mediated Compose runtimes.
 - Immutable run journals plus compact direct-agent notes.
 - Configurable persistent memory pages: select the built-in project state, tasks, decisions, operational constraints, and risks/blockers pages, then add local Markdown processes such as invoices.
@@ -20,12 +22,12 @@ The memory server binds to `127.0.0.1`. Project memory remains in the project, i
 - Internal Markdown or executable-backed external roadmaps, with revision-checked task updates.
 - Deterministic Sleep and sweep maintenance—no model call required.
 - Deterministic local retrieval and review-gated, source-cited memory dreams.
-- A provider-neutral image-generation MCP surface with an optional Leonardo adapter.
+- One `orchbun-mcp` server with agent orchestration tools and an optional Leonardo image-generation adapter.
 
 ## Requirements
 
 - Node.js 22.5 or newer
-- One or more provider CLIs/credentials for the agents you choose to run
+- One or more provider CLIs/credentials for the agents you choose to run; background runs use each CLI's own login, so sign in to `claude` and `codex` in a terminal first
 
 ## Install
 
@@ -351,6 +353,9 @@ Examples:
 orchbun context --prompt "Review authentication boundaries" --task APP-A1
 orchbun run --agent codex --prompt "Review APP-A1" --task APP-A1
 orchbun run --agent codex --mode work --prompt "Implement APP-A1" --task APP-A1
+orchbun run --agent claude --mode work --prompt "Implement APP-A2" --task APP-A2 --detach
+orchbun runs wait --run <run-id> --timeout 1800
+orchbun runs send --run <run-id> --prompt "Also cover the empty-input case"
 orchbun memory search --query "authentication boundary" --task APP-A1
 orchbun memory dream --subject memory/auth --out review-auth-memory.md
 orchbun memory dream --accept review-auth-memory.md --agent human-review
@@ -385,7 +390,18 @@ Roles are split deliberately:
 - **Master:** records durable memory, runs end-to-end verification, reviews and merges each worktree, and commits.
 - **Managed runs:** report outcomes, decisions, risks, and verification only in their JSON result. When no Orchbun-managed runtime is configured, they verify with unit tests only and do not start dev servers, browsers, end-to-end suites, or Docker. Inside a managed run, `memory record`, `compact`, `rebuild`, `dream --accept`, publishing `sleep`/`sweep`, `run`, and `runs send|cancel` are refused; read-only commands and `delegate` still work.
 
-Background work runs require `isolation.enabled: true`, so parallel agents never share a checkout. Worktrees start from the clean tracked `HEAD`, so commit or stash master changes that the agents need to see. `delegation.maxConcurrent` (default 4) caps active background runs:
+A typical Claude Code master turn looks like this:
+
+```sh
+orchbun run --agent codex --mode work --task APP-A1 --prompt "Implement APP-A1" --detach --json   # → run_id
+orchbun runs wait --run <run-id>          # started as a background command; the master is woken when it exits
+orchbun runs send --run <run-id> --prompt "Fix the failing parser test"
+orchbun workspaces inspect --run <first-run-id>   # review the worktree, merge it, run end-to-end checks
+```
+
+A run moves through `pending` → `running` → `completed`, `partial`, `blocked`, `failed`, or `interrupted`. Finished runs can take a follow-up while their provider session and workspace still exist; a follow-up records `resumes_run_id` and reuses the original run's worktree lease.
+
+Background work runs require `isolation.enabled: true`, so parallel agents never share a checkout. Starting one requires no uncommitted changes to tracked files in the control checkout, because each worktree branches from `HEAD`: commit or stash master edits first. `delegation.maxConcurrent` (default 4) caps active background runs:
 
 ```yaml
 delegation:
@@ -417,7 +433,7 @@ Headless children use each CLI's own login: run `claude` or `codex login` in a t
 
 ## Managed work-run isolation
 
-Isolation is opt-in. When enabled, each top-level work-mode run branches from the clean tracked `HEAD` into an ignored worktree under `memory/agents/worktrees/`. Review runs stay in the control checkout. Delegates inherit their parent's worktree and optional runtime, so they can inspect the same uncommitted changes instead of receiving a disconnected checkout.
+Isolation is opt-in, and required for background work runs. When enabled, each top-level work-mode run branches from the clean tracked `HEAD` into an ignored worktree under `memory/agents/worktrees/`. Review runs stay in the control checkout. Follow-ups sent with `runs send` continue in the original run's worktree. Delegates inherit their parent's worktree and optional runtime, so they can inspect the same uncommitted changes instead of receiving a disconnected checkout.
 
 ```yaml
 isolation:
@@ -456,7 +472,7 @@ project/
       manual/               built-in annotations, custom process pages, and qualifications
         pages/              authoritative custom-page Markdown by stable ID
       milestones/           accepted manifests
-      runs/                 immutable managed-run journals
+      runs/                 managed-run journals, with worker.json and worker.log for background runs
       leases/               worktree/runtime lease receipts
       worktrees/            retained isolated work checkouts
       working/              generated projections
@@ -519,9 +535,13 @@ supersedes: []
 
 Compaction archives the prior working tree with its manifest and publication receipt, publishes the accepted baseline atomically, and preserves human annotations alongside the accepted baseline.
 
-## Provider-neutral image generation
+## MCP server
 
-The `orchbun-mcp` executable also exposes `generate_image` and `get_image_generation` when `LEONARDO_API_KEY` is set. Leonardo is the currently implemented adapter. `LEONARDO_API_KEY` is read only from the environment and is never written to memory.
+`orchbun-mcp` always exposes the agent tools `agent_start`, `agent_send`, `agent_status`, `agent_wait`, and `agent_cancel` (see [Orchestrating agents from a master session](#orchestrating-agents-from-a-master-session)). It finds the project from `ORCHBUN_ROOT`, or from its working directory.
+
+### Provider-neutral image generation
+
+It also exposes `generate_image` and `get_image_generation` when `LEONARDO_API_KEY` is set. Leonardo is the currently implemented adapter. `LEONARDO_API_KEY` is read only from the environment and is never written to memory.
 
 ```json
 {
