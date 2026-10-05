@@ -1,76 +1,274 @@
-<p align="center"><img src="ORCHBUN-logo.png" alt="OrchBun — open source AI multi agent orchestration and memory" width="760"></p>
+<p align="center"><img src="ORCHBUN-logo.png" alt="OrchBun — open-source AI multi-agent orchestration and memory" width="760"></p>
 
 # OrchBun
 
-OrchBun is a local-first agent manager for solo developers. It runs Codex, Claude Code, and OpenRouter agents with bounded context, lets one interactive Claude Code or Codex session orchestrate the others in the background, records auditable results, maintains compact project memory, and provides a small local web workspace for everyday memory and roadmap work.
+**Local-first multi-agent orchestration and auditable project memory for solo developers.**
 
-The memory server binds to `127.0.0.1`. Project memory remains in the project, is ignored by Git by default, and is never uploaded by OrchBun itself.
+OrchBun runs Codex, Claude Code, and OpenRouter agents with bounded project context. It keeps an auditable local journal of prompts and results, maintains compact project memory, and lets an interactive Codex or Claude Code session coordinate background agents with isolated worktrees for work runs.
 
-## What 1.0 includes
+By default, memory stays under your project and is ignored by Git. When you run an agent, OrchBun sends the bounded memory and explicit context selected for that run to the chosen provider.
 
-- Review-first agent runs with explicit work mode and bounded delegation.
-- Master-session orchestration: background runs, wait, follow-ups in the same agent session, and cancellation, from the CLI or the `orchbun-mcp` agent tools.
-- A managed-run role: agents report through a validated JSON result, while the master alone records memory and runs end-to-end verification.
-- Optional managed work-run isolation with retained Git worktrees and narrowly mediated Compose runtimes.
-- Immutable run journals plus compact direct-agent notes.
-- Configurable persistent memory pages: select the built-in project state, tasks, decisions, operational constraints, and risks/blockers pages, then add local Markdown processes such as invoices.
-- Markdown preview, syntax-colored raw view, and textarea editing in the local web workspace.
-- A roadmap-backed Tasks page with Active, Blocked, and Done views.
-- Severity and business-urgency selectors for tasks and risks, deriving P1–P5 action levels.
-- Project-relative editors for the versioned roadmap and master `AGENTS.md`.
-- Checklist-gated milestone approval and manifest-gated memory compaction.
-- Internal Markdown or executable-backed external roadmaps, with revision-checked task updates.
-- Deterministic Sleep and sweep maintenance—no model call required.
-- Deterministic local retrieval and review-gated, source-cited memory dreams.
-- One `orchbun-mcp` server with agent orchestration tools and an optional Leonardo image-generation adapter.
+[npm](https://www.npmjs.com/package/orchbun) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/Bunlock/orchbun/issues) · [MIT license](LICENSE)
 
-## Requirements
+**Get started:** [Quick start](#quick-start) · [Agent providers](#agent-providers) · [Trust boundaries](#understand-the-trust-boundaries) · [Common workflows](#common-workflows)
 
-- Node.js 22.5 or newer
-- One or more provider CLIs/credentials for the agents you choose to run; background runs use each CLI's own login, so sign in to `claude` and `codex` in a terminal first
+**Reference:** [Configuration](#configuration) · [MCP setup](#orchestrate-from-codex-or-claude-code) · [Isolation](#managed-work-run-isolation) · [Memory lifecycle](#memory-lifecycle) · [CLI](#cli-reference) · [Troubleshooting](#troubleshooting)
 
-## Install
+## Quick start
 
-From npm [https://www.npmjs.com/package/orchbun]:
+You need Node.js 22.5 or newer, the Git CLI on `PATH` for agent runs, and at least one configured [agent provider](#agent-providers). The examples use Codex; replace `codex` with `claude` or `openrouter` when appropriate for your setup.
+
 ```sh
 npm install --global orchbun
-```
-
-From a source checkout:
-
-```sh
-npm install
-npm run check
-npm run build
-npm link
-```
-
-## Initialize and configure a project
-
-Run this once at the project root:
-
-```sh
+cd /path/to/your-project
 orchbun init
 ```
 
-When `orchbun.yaml` does not exist and stdin/stdout are interactive terminals, `orchbun init` opens a setup wizard. It asks which roadmap to use, which built-in memory pages to enable, and whether to add custom Markdown processes. Custom pages are excluded from agent context unless you explicitly include them.
+`init` is non-destructive. It never overwrites existing project contracts; it creates missing files and may append the local-memory rule to `.gitignore`. A default setup adds `orchbun.yaml`, `AGENTS.md`, local memory, and an internal `ROADMAP.md`. A new interactive project opens a setup wizard; redirected input and `--json` use compatibility defaults.
 
-Initialization is non-destructive. Existing files are preserved; missing `orchbun.yaml`, `AGENTS.md`, and the configured memory ignore rule are created. An internal roadmap is created when selected; an external roadmap must pass a read-only provider check before any configuration is written. Existing projects do not reopen the wizard or rewrite their configuration.
+Inspect the exact bounded prompt without invoking a provider:
 
-Redirected or piped init, and `orchbun init --json`, remain noninteractive. A new project then uses the compatibility defaults: internal `ROADMAP.md`, all five built-in pages, and no custom pages. Local memory defaults to `memory/agents/`.
+```sh
+orchbun context --agent codex --prompt "Review this project's error handling"
+```
 
-The relevant internal-roadmap configuration is:
+Run a review. Review mode is the default, so the agent should inspect and report without editing:
+
+```sh
+orchbun run --agent codex --prompt "Review this project's error handling"
+```
+
+Open the local Memory 1.0 workspace in another terminal:
+
+```sh
+orchbun memory web
+```
+
+Visit [http://127.0.0.1:4312](http://127.0.0.1:4312). The command keeps running until you stop it; use `--port 4313` if the default port is busy.
+
+## What OrchBun does
+
+### Bounded agent runs
+
+- Runs Codex and Claude Code in review or work mode, and OpenRouter in review mode.
+- Builds a size-limited prompt from the current project-memory pages and any project-relative files passed with `--context`.
+- Records the source prompt, expanded prompt, provider-native response, normalized result, available usage metadata, and verification evidence locally.
+- Rejects unknown options and options that do not apply to the selected command.
+
+### Auditable project memory
+
+- Keeps immutable run journals and schema-validated direct notes under ignored local memory.
+- Projects current project state, tasks, decisions, operational constraints, and risks into compact Markdown pages.
+- Provides deterministic local search, lifecycle-aware maintenance, and review-gated synthesis and compaction.
+- Offers a loopback-only web workspace for memory, roadmap, task, and `AGENTS.md` work.
+
+### Multi-agent orchestration
+
+- Starts background agents, waits for them, resumes finished Codex and Claude sessions, and cancels runs from the CLI or MCP.
+- Separates the master from managed runs: children return validated results; the master owns durable memory, integration, and end-to-end verification.
+- Optionally gives each top-level work run a retained Git worktree and a narrowly mediated Compose runtime; delegates and follow-ups reuse it.
+
+## Agent providers
+
+`--agent` defaults to `agents.default`, which is `codex` unless configured otherwise.
+
+| Provider | Setup | Modes | Session follow-up |
+|---|---|---|---|
+| Codex | Install the `codex` CLI and authenticate it in a terminal | Review and work | Yes |
+| Claude Code | Install the `claude` CLI and authenticate it in a terminal | Review and work | Yes |
+| OpenRouter | Set `OPENROUTER_API_KEY` | Review only | No |
+
+OpenRouter uses `agents.openrouterModel` unless `--model` overrides it. Credentials belong in environment variables, never in `orchbun.yaml` or project memory.
+
+Optional integrations have additional requirements:
+
+- Isolated work runs additionally require an initialized Git repository. Detached work runs require `isolation.enabled: true`.
+- Managed runtimes require Docker Compose and project-specific runtime configuration.
+- MCP image tools appear only when `LEONARDO_API_KEY` is set; Leonardo is the currently implemented image provider.
+
+## Understand the trust boundaries
+
+OrchBun is local-first, not offline-only and not an isolation boundary for hostile code.
+
+- The default `memory/` store is local plaintext and Git-ignored; it is not encrypted. `memoryDir` can be configured to another local directory.
+- A run sends its bounded expanded prompt to the selected provider. That prompt can contain enabled memory pages and files explicitly passed with `--context`.
+- Raw prompts and provider-native responses are retained locally for audit, but are not automatically loaded into later prompts.
+- The Memory web workspace has no authentication. It binds to `127.0.0.1` and must not be exposed through a public bind or reverse proxy.
+- Review mode uses provider-specific read-only or planning controls. In a Git workspace, OrchBun also checks Git-visible state afterward and marks the run failed if that state changed; this extra check is unavailable outside Git, does not detect ignored-file changes, and does not revert changes automatically.
+- Work mode can edit files. Without isolation, a foreground work run edits the current checkout.
+- External roadmap executables and `hooks.after_memory_rebuild` are trusted local code.
+- The Compose broker limits normal managed-runtime commands, but it does not secure an otherwise unrestricted same-user shell against deliberate Docker access.
+
+## Core concepts
+
+| Term | Meaning |
+|---|---|
+| Review run | Read-only inspection. This is the default mode. |
+| Work run | An explicit `--mode work` run that may edit files. |
+| Master | The interactive human-facing session that starts runs, reviews work, integrates it, records durable memory, and performs final verification. |
+| Managed run | A child agent that receives bounded context and returns one validated result. The CLI refuses durable record, compaction, rebuild, accepted-dream, published Sleep/sweep, and starting or steering background runs from that run. |
+| Refresh | Reconciles current sources into generated views. It does not change roadmap completion or run rebuild hooks. |
+| Rebuild | Validates direct notes, maintains the internal roadmap projection, refreshes views, and runs the configured trusted hook. |
+| Sleep | Deterministically reconciles follow-ups, lifecycle state, and subject indexes. |
+| Sweep | Previews or publishes lifecycle-aware archival and verification. |
+| Dream | Produces a source-cited synthesis proposal; nothing changes until a reviewed proposal is explicitly accepted. |
+| Compaction | Publishes an accepted milestone manifest and archives the prior working state. |
+
+## Common workflows
+
+### Review safely
+
+The [quick start](#quick-start) shows the basic review flow. Add a stable roadmap task, a prompt file, or explicit project-relative context when the review needs them:
+
+```sh
+orchbun context --task APP-A1 --prompt-file request.md \
+  --context docs/security.md,src/auth.ts
+```
+
+`memory/design/` and historical run output are never added automatically.
+
+### Run foreground work
+
+```sh
+orchbun run --agent codex --mode work --task APP-A1 \
+  --prompt "Implement APP-A1 and run its focused tests"
+```
+
+If isolation is disabled, this edits the current checkout. If isolation is enabled, OrchBun creates a retained worktree from tracked `HEAD`. A completed work run whose `--task` matches an internal-roadmap task checks that task automatically; external roadmap tasks change only through an explicit user action.
+
+### Run work in the background
+
+Background work requires isolation so parallel agents never share a checkout:
+
+```yaml
+isolation:
+  enabled: true
+```
+
+Commit changes the child must see, and stash or discard unrelated tracked changes. Isolated work starts from tracked `HEAD`; staged and unstaged tracked changes and untracked files are not copied into the child worktree.
+
+```sh
+orchbun run --agent codex --mode work --task APP-A1 \
+  --prompt "Implement APP-A1" --detach --json
+
+# Copy run_id from the JSON response and replace RUN_ID below.
+orchbun runs wait --run RUN_ID --timeout 1800
+orchbun runs send --run RUN_ID --prompt "Also cover the empty-input case"
+orchbun workspaces inspect --run RUN_ID
+```
+
+Review and merge the retained branch yourself. Cleanup is deliberately conservative:
+
+```sh
+orchbun workspaces cleanup --run RUN_ID
+```
+
+Cleanup refuses a dirty worktree or a branch that is not merged into the control checkout.
+
+### Record durable memory
+
+Create a project-relative Markdown note:
+
+```markdown
+# Authentication boundary completed
+
+- **Agent:** codex
+- **Recorded at:** 2026-10-05T12:00:00Z
+- **Task:** APP-A1
+- **Subjects:** security/auth
+- **Outcome:** Added the boundary and focused tests.
+- **Decisions:** Keep authorization in the service layer.
+- **Risks or blockers:** Browser verification remains pending.
+- **Next actions:** Verify the flow in the browser.
+- **Changed files:** src/auth.ts, test/auth.test.ts
+- **Verification:** Focused tests passed.
+- **Status:** active
+- **Work status:** partial
+```
+
+Then validate, record, and verify it:
+
+```sh
+orchbun memory record --file outcome.md
+orchbun memory verify
+```
+
+`memory record` appends an immutable note and refreshes current views. Supplying `Recorded at` makes an identical retry idempotent. `Supersedes` retires older notes explicitly; `Subjects` groups notes without silently choosing a winner.
+
+For routine state work:
+
+```sh
+orchbun memory refresh --dry-run   # read-only projection preview
+orchbun memory refresh             # publish generated views
+orchbun memory rebuild             # also maintain roadmap projection and run the hook
+orchbun memory verify              # validate the complete local memory store
+```
+
+Refresh timestamps are not verification timestamps: refreshing does not rerun tests.
+
+## Memory 1.0 workspace
+
+```sh
+orchbun memory web
+```
+
+The workspace provides:
+
+- Preview, raw, and revision-checked editing for human annotations and custom memory pages.
+- Active, blocked, and done roadmap views with severity and urgency ratings for tasks and risks.
+- Project-confined Markdown editors for `AGENTS.md` and an internal roadmap.
+- Explicit refresh, rebuild, verification, Sleep, sweep, milestone approval, and compaction actions.
+- Conflict handling that preserves an unsaved draft while showing the newer source.
+
+Built-in pages are generated from recorded sources; the editor saves only their human annotations. Custom pages store their full Markdown under `memory/agents/manual/pages/`. A milestone can be approved only after every step is checked and `memory verify` passes. Approval and compaction remain separate actions.
+
+## Configuration
+
+`orchbun init` creates `orchbun.yaml`. Omitted settings use validated defaults; this is a representative configuration:
 
 ```yaml
 version: 1
 memoryDir: memory/agents
+
+budgets:
+  maxInputChars: 12000
+  maxFileChars: 3500
+  maxOutputTokens: 1200
+  recentRuns: 6
+
+agents:
+  default: codex
+  openrouterModel: anthropic/claude-sonnet-4.5
+
+delegation:
+  maxDepth: 2
+  defaultMode: review
+  maxConcurrent: 4
+
 memoryPages:
-  enabled:
-    - project-state
-    - active-tasks
-    - decisions
-    - contracts
-    - risks
+  enabled: [project-state, active-tasks, decisions, contracts, risks]
+  custom: []
+
+roadmap:
+  provider: internal
+  path: ROADMAP.md
+```
+
+Run the interactive configuration wizard later to change memory pages or the roadmap provider:
+
+```sh
+orchbun configure
+```
+
+`configure` requires a terminal. It previews and validates the change, preserves unrelated YAML keys and comments, and publishes atomically. Other settings remain manual YAML configuration.
+
+### Custom memory pages
+
+Custom pages are local processes such as invoices or release checklists. They are excluded from agent context unless `includeInContext` is explicitly enabled:
+
+```yaml
+memoryPages:
+  enabled: [project-state, active-tasks, decisions, contracts, risks]
   custom:
     - id: invoices
       title: Invoices
@@ -79,90 +277,38 @@ memoryPages:
         # Invoices
 
         - [ ] Send this month's invoices.
-roadmap:
-  provider: internal
-  path: ROADMAP.md
 ```
 
-Custom process IDs are stable lowercase slugs. Their full Markdown is stored under `memory/agents/manual/pages/<id>.md`; built-in pages continue to store only their human annotations under `memory/agents/manual/`.
+Removing a custom page from configuration makes it dormant without deleting its Markdown. Re-adding the same stable ID restores it.
 
-Both `memoryPages` and `roadmap` are optional version 1 compatibility sections. Omitting them enables all five built-in pages in the order above and selects the existing local web-roadmap path when one was previously saved, otherwise `ROADMAP.md`.
+### External roadmaps
 
-The setup schema uses these limits:
-
-- `memoryPages.enabled` is an ordered list of unique built-in IDs: `project-state`, `active-tasks`, `decisions`, `contracts`, and `risks`.
-- `memoryPages.custom` accepts at most 50 entries. Each ID is a unique, non-reserved lowercase slug of at most 64 characters; each non-empty title is at most 120 characters; `includeInContext` is a boolean that defaults to `false`; and optional starter Markdown is at most 64,000 characters.
-- An internal `roadmap.path` is a project-relative `.md` path that stays inside the project after symlinks are resolved.
-- An external roadmap name is at most 120 characters. Its `command` is a JSON/YAML string array with 1 to 64 arguments, each at most 4,096 characters; the first argument is a non-empty executable. Credentials belong in the provider process environment, never in this array.
-
-### Change setup choices later
-
-Run the interactive configuration wizard from an initialized project:
-
-```sh
-orchbun configure
-```
-
-`orchbun configure [--root PATH]` preselects the current choices and shows the effects before applying them. It manages only `memoryPages` and `roadmap`; unrelated settings, unknown keys, and YAML comments remain in place. The command requires an interactive terminal. If the selected internal roadmap does not exist, OrchBun creates it only after the wizard asks for that file explicitly. The configured page order is also the order used by `memory show` and the Memory workspace tabs.
-
-Before applying, OrchBun validates the candidate YAML, parses or prepares the internal roadmap, performs a read-only external-provider request when applicable, and builds a complete dry-run memory projection. It then takes the projection lock, checks that `orchbun.yaml` has not changed since review, stages new starter files, replaces the configuration atomically, and publishes the refreshed projection. A validation or preview failure changes nothing. If publication fails, OrchBun restores the prior configuration and removes only unchanged files created by that attempt. A concurrent human edit is preserved rather than overwritten during apply or rollback. If the process stops during publication, the next OrchBun command detects the transaction receipt and finishes cleanup or restores the previous configuration and projection before loading project state.
-
-Configuration changes have these effects:
-
-- Disabling a built-in page removes its generated working page, web tab, search document, and normal agent-context entry. Its recorded source data and manual annotation remain local and return when the page is enabled again.
-- Removing a custom page removes its working, web, search, and context entries. Its `manual/pages/<id>.md` source remains dormant; adding the same ID restores its contents. Renaming changes the displayed title without changing the ID or file.
-- Turning `includeInContext` off excludes a custom page from both baseline context and retrieval. Custom pages default to off.
-- Changing roadmap providers does not delete or edit the previous `ROADMAP.md`, external cache, provider data, run history, direct notes, approved manifests, or compact archives. Task qualifications follow matching stable task IDs; unmatched qualifications remain dormant.
-- A roadmap-source change makes an existing Sleep snapshot stale. Publish a fresh one explicitly with `orchbun memory sleep`.
-
-Manual `orchbun.yaml` edits remain supported. Every command validates the loaded configuration. Preview their projected effect without publishing files:
-
-```sh
-orchbun memory refresh --dry-run
-```
-
-Invalid manual configuration stops the command while leaving the last published memory snapshot intact.
-
-### External roadmap providers
-
-An external roadmap is a trusted local executable configured as an argument array:
+An external roadmap is a trusted local executable that maps Jira, Notion, or another system into OrchBun's provider-neutral protocol:
 
 ```yaml
-memoryPages:
-  enabled: [project-state, active-tasks, decisions, contracts, risks]
-  custom: []
 roadmap:
   provider: external
   name: Jira
   command: [node, tools/orchbun-roadmap-provider.mjs]
 ```
 
-OrchBun starts the command from the project root with `shell: false`, sends one JSON object followed by a newline on stdin, and reads one JSON response from stdout. The default timeout is 30 seconds and stdout/stderr are each limited to 1 MiB. The executable maps Jira, Notion, or another system into this provider-neutral protocol.
-
-List request:
+OrchBun starts the command from the project root with `shell: false`, writes one JSON request to stdin, and reads one JSON response from stdout. A list request is:
 
 ```json
 {"schema_version":"1.0","operation":"list"}
 ```
 
-Completion request:
-
-```json
-{"schema_version":"1.0","operation":"set_completion","task_id":"APP-1","completed":true,"expected_revision":"jira-42"}
-```
-
-Every successful response returns the complete ordered task snapshot. A completion response also returns `updated` or `unchanged`:
+A successful response returns a stable revision and the complete ordered task snapshot:
 
 ```json
 {
   "schema_version": "1.0",
-  "revision": "jira-43",
-  "result": "updated",
+  "revision": "jira-42",
   "tasks": [
     {
       "id": "APP-1",
-      "title": "Connect the roadmap provider.",
-      "completed": true,
+      "title": "Connect the roadmap provider",
+      "completed": false,
       "milestone_id": "A",
       "milestone_title": "Foundation"
     }
@@ -170,257 +316,26 @@ Every successful response returns the complete ordered task snapshot. A completi
 }
 ```
 
-For a list response, omit `result`. Task IDs must be unique, one milestone ID must always use the same title, order must be deterministic, and a revision must identify exactly one snapshot. Providers report structured `conflict`, `not_found`, `unauthorized`, `unavailable`, or `invalid_request` errors:
+Completion requests include `task_id`, `completed`, and `expected_revision`; successful responses return the full new snapshot and `result: updated|unchanged`. Providers can return structured `conflict`, `not_found`, `unauthorized`, `unavailable`, or `invalid_request` errors. Credentials stay in the executable's environment. Stale cached data can be displayed, but cannot update tasks, publish Sleep, approve milestones, or pass a configuration preview.
 
-```json
-{
-  "schema_version": "1.0",
-  "error": {
-    "code": "conflict",
-    "message": "The roadmap changed.",
-    "actual_revision": "jira-44"
-  }
-}
-```
+## Orchestrate from Codex or Claude Code
 
-A minimal persistent executable provider can use the same JSON shape locally:
+The CLI works on its own. To let an interactive Codex or Claude Code master start and steer agents directly, register `orchbun-mcp`.
 
-```js
-#!/usr/bin/env node
-import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
-
-const stateFile = new URL("../roadmap-provider-state.json", import.meta.url);
-let input = "";
-for await (const chunk of process.stdin) input += chunk;
-const request = JSON.parse(input);
-const state = JSON.parse(await readFile(stateFile, "utf8"));
-const send = (value, exitCode = 0) => {
-  process.stdout.write(JSON.stringify(value));
-  process.exitCode = exitCode;
-};
-
-if (request.operation === "list") {
-  send({ schema_version: "1.0", ...state });
-} else if (request.operation === "set_completion") {
-  if (request.expected_revision !== state.revision) {
-    send({
-      schema_version: "1.0",
-      error: { code: "conflict", message: "Revision changed", actual_revision: state.revision },
-    }, 2);
-  } else {
-    const task = state.tasks.find((item) => item.id === request.task_id);
-    if (!task) {
-      send({ schema_version: "1.0", error: { code: "not_found", message: "Task not found" } }, 2);
-    } else {
-      const result = task.completed === request.completed ? "unchanged" : "updated";
-      task.completed = request.completed;
-      if (result === "updated") state.revision = randomUUID();
-      await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`);
-      send({ schema_version: "1.0", result, ...state });
-    }
-  }
-} else {
-  send({ schema_version: "1.0", error: { code: "invalid_request", message: "Unknown operation" } }, 2);
-}
-```
-
-Seed `roadmap-provider-state.json` with a `revision` and `tasks` array matching the response example. Real integrations should read API tokens and other credentials from environment variables. Never place provider credentials in `orchbun.yaml`, provider output, or project memory.
-
-Validated external snapshots are cached under ignored local memory. When a provider is unavailable, an explicitly stale-tolerant read may display the last snapshot with a stale warning. Stale data cannot update tasks, publish Sleep, approve milestones, or pass a configuration preview. Authorization, schema, and integrity errors never fall back to the cache. OrchBun never creates external tasks, and external task completion happens only through an explicit user checkbox.
-
-Then open Memory 1.0:
-
-```sh
-orchbun memory web
-```
-
-Visit [http://127.0.0.1:4312](http://127.0.0.1:4312). Use `--port 4313` for another port.
-
-The header derives the project name from its package metadata or directory and displays:
-
-```text
-<project name> | OrchBun memory 1.0
-```
-
-### Editing and project files
-
-Each memory page supports Preview, Raw, Edit annotations, and Save. Human annotations stay under `memory/agents/manual/` and appear alongside generated state. Existing full-page overrides are preserved as annotations without rewriting their source files. They no longer hide newer recorded outcomes, task status, or risk resolution. The editor edits annotations only; Preview shows the combined result. Saves carry a source revision and reject outdated drafts before applying them.
-
-The Project files page opens and edits project-relative Markdown paths. `AGENTS.md` is always available, and the configured roadmap editor is available for internal Markdown roadmaps. External roadmaps show their provider identity and freshness instead of exposing a local roadmap editor. Absolute paths, non-Markdown files, and paths outside the project are rejected.
-
-Roadmap checkboxes are validation gates. A milestone can be approved only when all of its steps are checked and `memory verify` passes. Approval creates a schema-valid local manifest under `memory/agents/milestones/<milestone>/approved.yaml`; compaction remains a separate, explicit publish action.
-
-### Keeping project state current
-
-`orchbun memory refresh` reads the roadmap, compact baseline, normalized run records, direct notes, and human annotations/qualifications. It publishes one revision shared by the web workspace and generated Markdown. Unchanged inputs keep the same revision and refresh time and do not rewrite pages. No model call, raw transcript scan, roadmap completion, archival, or rebuild hook is involved.
-
-Managed agents calculate current context before a run and refresh after recording its outcome. `orchbun context`, run dry-runs, and `memory refresh --dry-run` calculate state without initializing memory or writing files. The web workspace checks on opening, refocusing, every 15 seconds while visible, and when Refresh is clicked. Saves refresh before returning. Unsaved drafts survive background refresh; a conflicting save reports that the draft has not been applied. Review updates displays the newer content alongside the preserved draft, so you can reconcile it before saving.
-
-Published refreshes also maintain a disposable lexical index under `memory/agents/search/`. Managed runs receive the enabled built-in pages plus custom pages explicitly included in context while OrchBun builds a retrieval candidate in shadow mode and stores only comparison metadata in the run's context receipt; retrieved content is not promoted into production prompts yet. The candidate reserves its budget for enabled authority pages before source-cited query evidence. A missing or invalid index is rebuilt in memory, and an index-publication failure cannot block authoritative refresh; the authoritative Markdown and JSON records remain unchanged.
-
-The header shows the last successful refresh and revision, separately from the last **recorded** verification. Refresh does not rerun tests. A failed refresh keeps the last valid snapshot available and shows the failure. Interrupted working-directory publication is recovered on the next publishing refresh.
-
-For a direct agent outcome, prepare a project-relative Markdown file:
-
-```markdown
-# Task outcome
-- **Agent:** codex
-- **Recorded at:** 2026-09-05T12:00:00Z
-- **Task:** APP-A1
-- **Outcome:** Implemented the change; browser verification remains pending.
-- **Decisions:** Keep the existing storage contract.
-- **Risks or blockers:** Browser verification pending.
-- **Next actions:** Verify APP-A1 in the browser.
-- **Changed files:** src/example.ts
-- **Verification:** Focused unit tests passed.
-- **Status:** active
-- **Work status:** partial
-```
-
-```sh
-orchbun memory record --file outcome.md --json
-orchbun memory refresh --dry-run --json
-orchbun memory verify
-```
-
-Use the actual recording time. The record command fills missing Agent and Recorded at fields, validates the complete note before writing it, and gives it an immutable ID. Supplying Recorded at makes retrying identical content idempotent. `Supersedes` explicitly replaces older notes; `Subjects` groups them without deciding which is current. Reviewed syntheses may also carry `Sources` and `Based on revision`. Work status is optional (`completed`, `partial`, `blocked`, or `cancelled`) and does not check a roadmap task. A note saved before a refresh failure remains recorded; correct the source issue and run `memory refresh`.
-
-Risk bullets can carry a stable identity, for example `- [risk:browser-proof] Browser verification pending.` Keep the identity when editing the wording to retain its qualification and resolution. Existing unlabelled risks retain their content-based IDs.
-
-### Internal roadmap format
-
-A milestone is a level 2 to 4 heading of the form `<ID> — <Title>`, with an optional `Phase ` prefix: `## A — Foundation`, `### Phase E0 — Environment contract`. Headings without that shape are ordinary prose and leave the current milestone in place. A step is `- [ ] **<TASK-ID>** <title>`, continued on indented lines; checklist lines without a bold task ID are ignored by every gate.
-
-`active-tasks.md` leads with the first incomplete milestone, then lists the remaining open steps under `## Scheduled`, so no known roadmap work is hidden while the current milestone stays in front.
-
-`memory rebuild` also projects ad-hoc work back into the roadmap. Direct notes whose task and next actions name no roadmap step are written as a plain checklist between `<!-- orchbun:phase-p:start -->` and `<!-- orchbun:phase-p:end -->` under `## Phase P — Product work tracked in direct notes`, appended once if those markers are absent. Entries are checked only when their note explicitly records `Work status: completed`. Retired, superseded, or cancelled records without completed work appear separately; retiring memory does not establish delivery. Previously recorded delivered entries whose source has been archived remain in the historical checklist. Everything outside the markers is left byte for byte; the generated lines carry no task ID, so they never gate a milestone approval. A project with no ad-hoc notes and no markers is not touched.
-
-### Severity, urgency, and priority
-
-Tasks and risks use two independent inputs:
-
-| Severity (technical impact) | High urgency | Medium urgency | Low urgency |
-|---|---:|---:|---:|
-| Critical — system/core flow down | P1 | P2 | P3 |
-| Major — core function broken | P2 | P3 | P4 |
-| Minor — cosmetic or typo | P3 | P4 | P5 |
-
-- P1: immediate, all hands; workaround or fix within hours.
-- P2: urgent; address within the same business day.
-- P3: standard weekly sprint work.
-- P4: target the next scheduled release.
-- P5: retain in the backlog until capacity permits.
-
-## CLI reference
-
-OrchBun rejects unknown options and options that do not apply to the selected command.
-
-| Command | Purpose | Relevant options |
-|---|---|---|
-| `orchbun init` | Initialize config, versioned master files, and ignored local memory | `--root`, `--json` |
-| `orchbun configure` | Interactively review and change memory-page and roadmap setup | `--root` |
-| `orchbun context` | Print the exact bounded context without invoking an agent | run options, `--json` |
-| `orchbun run` | Run an agent; review mode is the default | `--agent`, `--prompt`/`--prompt-file`, `--task`, `--mode`, `--context`, `--model`, `--dry-run`, `--detach`, `--json`, `--root` |
-| `orchbun runs list` | List the 20 most recent runs with their status | `--json`, `--root` |
-| `orchbun runs status` | Show one run, including its result once finished | `--run`, `--json`, `--root` |
-| `orchbun runs wait` | Block until a background run finishes; exit code 1 on timeout | `--run`, `--timeout`, `--json`, `--root` |
-| `orchbun runs send` | Continue a finished run's agent session in the background | `--run`, `--prompt`/`--prompt-file`, `--json`, `--root` |
-| `orchbun runs cancel` | Stop a background run and its agent process | `--run`, `--json`, `--root` |
-| `orchbun delegate` | Run a bounded child from a managed work-mode parent | run options |
-| `orchbun workspaces list` | List retained managed worktree leases | `--json`, `--root` |
-| `orchbun workspaces inspect` | Inspect one worktree/runtime lease | `--run`, `--json`, `--root` |
-| `orchbun workspaces cleanup` | Remove one clean, merged worktree and its isolated runtime data | `--run`, `--json`, `--root` |
-| `orchbun runtime status` | Show the current run's allowlisted Compose status | managed isolated runs only |
-| `orchbun runtime rebuild` | Rebuild/recreate the current run's configured services | managed isolated runs only |
-| `orchbun runtime logs` | Read the last 200 lines from the current run's configured services | managed isolated runs only |
-| `orchbun memory show` | Refresh and print the enabled working pages | `--root` |
-| `orchbun memory runs` | List managed runs and direct notes | `--root` |
-| `orchbun memory search` | Search current memory, with explicit opt-in historical recall | `--query`, `--task`, `--subject`, `--history`, `--json`, `--root` |
-| `orchbun memory dream` | Preview or explicitly accept a cited synthesis proposal | `--task`/`--subject`/`--all`, `--out`, `--accept`, `--agent`, `--json`, `--root` |
-| `orchbun memory refresh` | Refresh local project views, or calculate a read-only preview | `--dry-run`, `--json`, `--root` |
-| `orchbun memory record` | Validate and append an immutable note, then refresh | `--file`, `--agent`, `--json`, `--root` |
-| `orchbun memory rebuild` | Explicitly maintain the roadmap projection, refresh views, and run the configured hook | `--root` |
-| `orchbun memory verify` | Validate runs, direct notes, manifests, archives, and image records | `--root` |
-| `orchbun memory sleep` | Preview or publish deterministic roadmap reconciliation | `--dry-run`, `--json`, `--root` |
-| `orchbun memory sweep` | Preview or publish lifecycle-aware archival and verification | `--dry-run`, `--json`, `--root` |
-| `orchbun memory compact` | Publish one accepted manifest or all unpublished accepted manifests | `--milestone`/`--all`, `--manifest`, `--scope shared`, `--json`, `--root` |
-| `orchbun memory web` | Start the local Memory 1.0 workspace | `--port`, `--root` |
-
-Examples:
-
-```sh
-orchbun context --prompt "Review authentication boundaries" --task APP-A1
-orchbun run --agent codex --prompt "Review APP-A1" --task APP-A1
-orchbun run --agent codex --mode work --prompt "Implement APP-A1" --task APP-A1
-orchbun run --agent claude --mode work --prompt "Implement APP-A2" --task APP-A2 --detach
-orchbun runs wait --run <run-id> --timeout 1800
-orchbun runs send --run <run-id> --prompt "Also cover the empty-input case"
-orchbun memory search --query "authentication boundary" --task APP-A1
-orchbun memory dream --subject memory/auth --out review-auth-memory.md
-orchbun memory dream --accept review-auth-memory.md --agent human-review
-orchbun memory sleep --dry-run
-orchbun memory sweep --dry-run
-orchbun memory compact --milestone a
-orchbun memory compact --all
-```
-
-`--prompt-file` and `--context` paths must stay inside the project. Review mode is read-only. Work mode must be explicit. Delegation is accepted only inside a managed work-mode run and is bounded by `orchbun.yaml`.
-
-To run a project-local command after a successful memory rebuild, configure the optional hook in `orchbun.yaml`:
-
-```yaml
-hooks:
-  after_memory_rebuild: node scripts/update-roadmap.mjs
-```
-
-The command runs through the system shell with the project root as its working directory. A non-zero exit makes the rebuild fail, so hook commands should be trusted, deterministic project tooling.
-
-## Orchestrating agents from a master session
-
-Any interactive Claude Code or Codex session can act as a master that starts, follows, and steers other Codex and Claude runs. You keep talking to the master as usual; the other agents run headless in the background and report back to it.
-
-- `orchbun run --detach` (or the `agent_start` MCP tool) validates the request, prepares its context and worktree, records the run, and returns its id immediately. A detached worker process then runs the agent.
-- `orchbun runs wait --run <id>` blocks until that run finishes and prints its summary. A Claude Code master runs it as a background command and is woken when it exits. A Codex master calls `agent_wait`, which returns early after `timeout_seconds` (default 50) so it stays under MCP tool timeouts.
-- `orchbun runs send --run <id>` (or `agent_send`) continues a finished run's Codex thread or Claude session, in the same worktree and mode, with a short follow-up prompt.
-- `orchbun runs cancel --run <id>` (or `agent_cancel`) stops the worker and its agent process group. The run is recorded as `interrupted` and its worktree is kept. A worker that dies without recording a result is also reported as `interrupted`.
-
-Roles are split deliberately:
-
-- **Master:** records durable memory, runs end-to-end verification, reviews and merges each worktree, and commits.
-- **Managed runs:** report outcomes, decisions, risks, and verification only in their JSON result. When no Orchbun-managed runtime is configured, they verify with unit tests only and do not start dev servers, browsers, end-to-end suites, or Docker. Inside a managed run, `memory record`, `compact`, `rebuild`, `dream --accept`, publishing `sleep`/`sweep`, `run`, and `runs send|cancel` are refused; read-only commands and `delegate` still work.
-
-A typical Claude Code master turn looks like this:
-
-```sh
-orchbun run --agent codex --mode work --task APP-A1 --prompt "Implement APP-A1" --detach --json   # → run_id
-orchbun runs wait --run <run-id>          # started as a background command; the master is woken when it exits
-orchbun runs send --run <run-id> --prompt "Fix the failing parser test"
-orchbun workspaces inspect --run <first-run-id>   # review the worktree, merge it, run end-to-end checks
-```
-
-A run moves through `pending` → `running` → `completed`, `partial`, `blocked`, `failed`, or `interrupted`. Finished runs can take a follow-up while their provider session and workspace still exist; a follow-up records `resumes_run_id` and reuses the original run's worktree lease.
-
-Background work runs require `isolation.enabled: true`, so parallel agents never share a checkout. Starting one requires no uncommitted changes to tracked files in the control checkout, because each worktree branches from `HEAD`: commit or stash master edits first. `delegation.maxConcurrent` (default 4) caps active background runs:
-
-```yaml
-delegation:
-  maxConcurrent: 4
-isolation:
-  enabled: true
-```
-
-Register the MCP server once per master client. For Claude Code, add it to the project's `.mcp.json`:
+For Claude Code, add a project `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "orchbun": { "command": "orchbun-mcp", "env": { "ORCHBUN_ROOT": "/absolute/path/to/project" } }
+    "orchbun": {
+      "command": "orchbun-mcp",
+      "env": { "ORCHBUN_ROOT": "/absolute/path/to/project" }
+    }
   }
 }
 ```
 
-For Codex, add it to `~/.codex/config.toml`:
+For Codex, add this to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.orchbun]
@@ -429,11 +344,31 @@ env = { ORCHBUN_ROOT = "/absolute/path/to/project" }
 tool_timeout_sec = 120
 ```
 
-Headless children use each CLI's own login: run `claude` or `codex login` in a terminal once if a child reports an authentication error.
+The server always exposes:
+
+- `agent_start`
+- `agent_send`
+- `agent_status`
+- `agent_wait`
+- `agent_cancel`
+
+`agent_start` returns immediately. `agent_wait` can wait for any or all selected runs, `agent_send` resumes a finished Codex or Claude session in the same mode and workspace, and cancellation retains any isolated workspace for inspection.
+
+The intended master role records durable memory, runs end-to-end verification, reviews and merges worktrees, and commits. Managed agents should return outcomes, decisions, risks, blockers, file changes, and focused verification through their validated result.
+
+When `LEONARDO_API_KEY` is present, the same MCP server also exposes `generate_image` and `get_image_generation`. Generation records remain local and are excluded from prompt-loaded memory.
 
 ## Managed work-run isolation
 
-Isolation is opt-in, and required for background work runs. When enabled, each top-level work-mode run branches from the clean tracked `HEAD` into an ignored worktree under `memory/agents/worktrees/`. Review runs stay in the control checkout. Follow-ups sent with `runs send` continue in the original run's worktree. Delegates inherit their parent's worktree and optional runtime, so they can inspect the same uncommitted changes instead of receiving a disconnected checkout.
+Isolation is disabled by default. When enabled:
+
+- Top-level work runs receive a retained branch and worktree under ignored local memory.
+- Review runs remain in the control checkout.
+- Delegates and follow-ups reuse the original worktree and optional runtime.
+- The tracked control checkout must be clean before a worktree is provisioned.
+- Completion or cancellation stops the optional Compose project without deleting its volumes and retains the worktree for review.
+
+An optional Compose runtime is configured entirely from trusted project settings:
 
 ```yaml
 isolation:
@@ -455,11 +390,36 @@ isolation:
     healthTimeoutMs: 120000
 ```
 
-The Compose project name, ports, endpoint environment, service allowlist, and Compose files come only from the recorded lease and trusted project configuration. During the run, a local run-scoped broker accepts only `status`, `rebuild`, and bounded `logs`; it does not accept arbitrary Docker or Compose arguments. The agent process is not put in Docker and is instructed not to invoke Docker directly. Adapter sandboxing remains part of the security boundary: this feature does not make an otherwise unrestricted same-user shell safe against deliberate Docker access.
+Inside a managed runtime, agents can use only:
 
-At the end of a run, Orchbun stops the Compose project without deleting its isolated volumes and retains the branch/worktree for human review. `orchbun workspaces cleanup --run <id>` refuses dirty worktrees and branches not merged into the control checkout; after those checks pass, it removes only that lease's Compose volumes, worktree, and branch. Lease metadata remains under ignored memory for audit. The normal project stack and its ports are never selected by the allocator unless explicitly placed in the configured ranges.
+```sh
+orchbun runtime status
+orchbun runtime rebuild
+orchbun runtime logs
+```
 
-## Memory layout
+The run-scoped broker derives the Compose project and ports from the recorded lease, and files, services, and environment names from trusted configuration. It accepts no arbitrary Docker or Compose arguments.
+
+## Memory lifecycle
+
+| Command | Effect |
+|---|---|
+| `memory show` | Publishes a refresh, then prints enabled pages. |
+| `memory runs` | Lists managed runs and direct notes. |
+| `memory search` | Deterministically searches current heads and accepted compact memory; `--history` opts into inactive and archived sources. |
+| `memory dream` | Produces a cited proposal by task, subject, or all current memory; `--accept` records only an explicitly reviewed, revision-bound proposal. |
+| `memory refresh` | Reconciles and publishes current views; `--dry-run` is read-only. |
+| `memory record` | Validates and appends one immutable direct note, then refreshes. |
+| `memory rebuild` | Validates direct notes, maintains the internal roadmap projection, refreshes, and runs the configured hook. |
+| `memory verify` | Validates journals, notes, refresh state, Sleep, search, manifests, archives, and image records. |
+| `memory sleep` | Reconciles follow-ups, lifecycle status, and subjects; `--dry-run` previews. |
+| `memory sweep` | Performs lifecycle-aware archival and verification; `--dry-run` previews. |
+| `memory compact` | Publishes an accepted milestone manifest and archives the previous working state. |
+| `memory web` | Refreshes, then starts the loopback-only workspace; `--port` changes the default port 4312. |
+
+`memory search` works when called explicitly, but search results are not yet added automatically to managed-run prompts.
+
+### Memory layout
 
 ```text
 project/
@@ -469,99 +429,94 @@ project/
   memory/                   local and ignored
     agents/
       direct/               immutable compact notes
-      manual/               built-in annotations, custom process pages, and qualifications
-        pages/              authoritative custom-page Markdown by stable ID
+      manual/               annotations, qualifications, and custom pages
       milestones/           accepted manifests
-      runs/                 managed-run journals, with worker.json and worker.log for background runs
-      leases/               worktree/runtime lease receipts
-      worktrees/            retained isolated work checkouts
+      runs/                 prompts, results, native output, and worker logs
+      leases/               worktree and runtime receipts
+      worktrees/            retained isolated checkouts
       working/              generated projections
       archive/              compaction and sweep snapshots
       sleep/                deterministic reconciliation snapshots
-      refresh/              current project-state snapshot and recovery receipt
-      search/               disposable versioned lexical index
-      cache/roadmap/         validated external-roadmap snapshots
+      refresh/              current projection and recovery receipt
+      search/               disposable local lexical index
+      cache/roadmap/        validated external-roadmap snapshots
 ```
 
-Raw prompts and native provider responses are retained for audit but never loaded automatically into future prompts. `memory/design/` is also opt-in context only.
+Generated `working/` pages are projections, not hand-edited authority. Built-in annotations and custom pages live under `manual/`; immutable direct notes and accepted manifests remain authoritative inputs.
 
-Direct notes use `memory/agents/direct/YYYY/MM/<UTC timestamp>-<task-slug>.md` and record Agent, Recorded at, Task, Outcome, Decisions, Risks or blockers, Next actions, Changed files, Verification, and Status. `Supersedes` can retire obsolete state without deleting history. Optional `Subjects` entries use stable lowercase keys such as `memory/sleep` for deterministic grouping.
+### In-process memory API
 
-`memory search` returns current heads and the accepted compact baseline by default. `--history` additionally exposes superseded, retired, and archived records with explicit lifecycle labels. Ranking is deterministic: exact task, exact subject, lexical relevance, then timestamp and stable ID.
-
-`memory dream` is extractive and read-only until acceptance. It writes an editable Markdown draft with hidden revision-bound proposal metadata, inline source citations, conflicts, retirement candidates, and proposed supersession targets. Parallel heads are visible and omitted from supersession by default; resolving them requires an explicit, machine-validated review entry. Acceptance validates the revision, citations, and older current supersession targets under the projection lock before recording a new direct note. It never invokes sweep or compaction.
-
-## In-process memory API
-
-The same capability is available to Node.js consumers through the typed ESM subpath:
+Node.js consumers can use the typed ESM subpath:
 
 ```ts
 import { MemoryService } from "orchbun/memory";
 
 const memory = await MemoryService.open(projectRoot);
 const result = memory.retrieve({ text: "authentication boundary", taskId: "APP-A1" });
-const proposal = memory.proposeDream({ subject: "memory/auth" });
+const proposal = memory.proposeDream({ subject: "security/auth" });
+
 // After human review:
 await memory.acceptDream(proposal, reviewedMarkdown, "human-review");
 ```
 
-`MemoryService.open()` is read-only. Only `refreshIndex()` publishes the disposable index, and only `acceptDream()` records an explicitly reviewed successor note. Neither method archives or compacts authoritative memory.
+`MemoryService.open()` is read-only. Only `refreshIndex()` publishes the disposable index, and only `acceptDream()` records an explicitly reviewed successor note. Neither archives nor compacts authoritative memory.
 
-`memory sleep` resolves transitive supersession and lifecycle status before selecting follow-ups. Its content-addressed snapshot also contains a stable subject index: explicit `Subjects` first, exact roadmap task IDs second, and `unclassified` as the fallback. Multiple current heads under one subject are reported as parallel heads rather than merged implicitly.
+## CLI reference
 
-## Accepted milestone compaction
+| Command | Purpose | Key options |
+|---|---|---|
+| `orchbun init` | Initialize missing project contracts and ignored local memory | `--root`, `--json` |
+| `orchbun configure` | Interactively change memory pages and roadmap setup | `--root` |
+| `orchbun context` | Print bounded context without invoking a provider | `--prompt`/`--prompt-file`, `--agent`, `--task`, `--mode`, `--context`, `--model`, `--root`, `--json` |
+| `orchbun run` | Run an agent; review is the default | context options plus mutually exclusive `--dry-run` or `--detach` |
+| `orchbun delegate` | Run a bounded child from a managed work-mode parent | context options plus `--dry-run`; no `--detach` |
+| `orchbun runs list` | List the 20 most recent runs | `--json`, `--root` |
+| `orchbun runs status` | Inspect one run and its result | `--run`, `--json`, `--root` |
+| `orchbun runs wait` | Wait for a background run; exit 1 on timeout | `--run`, `--timeout`, `--json`, `--root` |
+| `orchbun runs send` | Continue a finished provider session | `--run`, `--prompt`/`--prompt-file`, `--json`, `--root` |
+| `orchbun runs cancel` | Stop a background worker and retain any isolated workspace | `--run`, `--json`, `--root` |
+| `orchbun workspaces list` | List retained isolation leases | `--json`, `--root` |
+| `orchbun workspaces inspect` | Inspect one lease | `--run`, `--json`, `--root` |
+| `orchbun workspaces cleanup` | Remove one clean, merged workspace and its isolated runtime data | `--run`, `--json`, `--root` |
+| `orchbun runtime status\|rebuild\|logs` | Use the current managed Compose runtime | managed isolated runs only |
+| `orchbun memory …` | Search, record, maintain, verify, compact, or view memory | See [Memory lifecycle](#memory-lifecycle); every subcommand also accepts `--root` |
 
-Compaction consumes only schema-valid manifests whose review decision is `accepted`. It never summarizes a raw conversation. A manifest records validated outcomes, durable decisions, contracts, risks, pending work, artifacts, and exact superseded items.
+Run `orchbun --help` for the exact synopsis. Options that do not apply to the selected command are rejected. Prompt, context, note, and project-editor paths are documented as project-relative inputs; trusted configuration and explicit manifest paths have their own validation rules.
 
-```yaml
-schema_version: "1.0"
-milestone: a
-scope: shared
-review:
-  decision: accepted
-  accepted_at: 2026-08-12T12:00:00Z
-  accepted_by: project-review
-summary: Foundation is accepted.
-validated_outcomes: [The acceptance suite passes.]
-decisions: [Keep memory local-first.]
-contracts: [The web server binds to 127.0.0.1.]
-risks: []
-pending_work: [Plan the next milestone.]
-artifacts:
-  - path: ROADMAP.md
-    description: Validated project roadmap.
-supersedes: []
+## Troubleshooting
+
+| Problem | What to check |
+|---|---|
+| `Could not find orchbun.yaml` | Run `orchbun init` at the project root, change into the initialized project, or pass `--root PATH`. |
+| Codex or Claude authentication fails | Start that CLI in a normal terminal and complete its login before launching a headless run. |
+| OpenRouter reports a missing key | Export `OPENROUTER_API_KEY` in the environment that starts OrchBun. OpenRouter supports review mode only. |
+| `orchbun configure` refuses to run | The wizard requires interactive stdin and stdout. Edit YAML manually for automation. |
+| Port 4312 is busy | Run `orchbun memory web --port 4313`. |
+| Detached work is refused | Enable `isolation.enabled` and ensure the tracked control checkout is clean. |
+| The isolated agent cannot see local edits | Worktrees start from tracked `HEAD`. Commit edits the child needs; stashed, staged, unstaged, and untracked files are not copied. |
+| Workspace cleanup is refused | Commit or remove worktree changes, merge the retained branch into the control checkout, then retry. |
+| `runtime` commands are unavailable | They work only inside a managed isolated run with a configured Compose runtime. |
+| Generated memory looks stale | Run `orchbun memory refresh`; use `memory rebuild` only when you also want roadmap projection and the configured hook. |
+| Sleep is stale after changing roadmaps | Publish a new snapshot with `orchbun memory sleep`. |
+| Verification fails after an interrupted write | Correct the reported source or configuration problem, rerun refresh or rebuild as appropriate, then run `memory verify` again. |
+
+## Development
+
+From a source checkout:
+
+```sh
+npm install
+npm run dev -- --help
+npm run check
+npm run build
+npm link
 ```
 
-Compaction archives the prior working tree with its manifest and publication receipt, publishes the accepted baseline atomically, and preserves human annotations alongside the accepted baseline.
-
-## MCP server
-
-`orchbun-mcp` always exposes the agent tools `agent_start`, `agent_send`, `agent_status`, `agent_wait`, and `agent_cancel` (see [Orchestrating agents from a master session](#orchestrating-agents-from-a-master-session)). It finds the project from `ORCHBUN_ROOT`, or from its working directory.
-
-### Provider-neutral image generation
-
-It also exposes `generate_image` and `get_image_generation` when `LEONARDO_API_KEY` is set. Leonardo is the currently implemented adapter. `LEONARDO_API_KEY` is read only from the environment and is never written to memory.
-
-```json
-{
-  "mcpServers": {
-    "orchbun": {
-      "command": "orchbun-mcp",
-      "env": {
-        "ORCHBUN_ROOT": "/absolute/path/to/project",
-        "LEONARDO_API_KEY": "${LEONARDO_API_KEY}"
-      }
-    }
-  }
-}
-```
-
-Generation records are local, auditable, and excluded from prompt-loaded memory. A fake adapter can be used in tests without consuming provider credits.
+The public package is intentionally focused. Cross-platform CI and installed-package smoke coverage, pluggable adapter conformance, and safe memory-metadata export/import remain open roadmap work; see [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-OrchBun is MIT licensed and open to focused pull requests from humans and from agents working with human maintainers. Agent-authored PRs are welcome: disclose substantial agent assistance, include verification, and remain accountable for the submitted change. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Focused pull requests from humans and agents are welcome. Disclose substantial agent assistance, include verification, and remain accountable for the submitted change. Changes to memory publication, milestone approval, filesystem access, or work-mode execution need explicit safety notes. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

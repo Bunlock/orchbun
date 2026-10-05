@@ -50,7 +50,7 @@ export async function syncRoadmapProjection(
   const historical = adHoc.filter((note) => !delivered.includes(note) && !inProgress.includes(note));
   // A sweep moves retired notes to archive/direct, so the note backing a delivered entry stops
   // existing. The roadmap is the durable record of shipped ad-hoc work: keep what was written.
-  const lines = delivered.map(itemText);
+  const lines = [...new Set(delivered.map(itemText))];
   const kept = new Set(lines);
   for (const line of retainedDelivered(existing?.[1] ?? "")) if (!kept.has(line) && !adHoc.some(note => itemText(note) === line)) { lines.push(line); kept.add(line); }
   const region = [

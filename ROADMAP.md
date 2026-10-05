@@ -36,6 +36,8 @@
 
 ### Delivered
 
+- [x] Improve README.md
+- [x] Add the approved logo to the OrchBun web page
 - [x] Configurable OrchBun initialization and reconfiguration
 - [x] Finalize in-house OrchBun retrieval and reviewed dreaming.
 - [x] Implement in-house OrchBun retrieval and reviewed dreaming.

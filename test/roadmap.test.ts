@@ -110,6 +110,27 @@ test("roadmap projection rewrites only its own region and never emits parseable 
   assert.equal(await readFile(path.join(root, "ROADMAP.md"), "utf8"), written);
 });
 
+test("roadmap projection emits one delivered item for superseding notes about the same task", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-projection-deduplicate-"));
+  await writeFile(path.join(root, "ROADMAP.md"), projectionRoadmap);
+  const first = note({
+    id: "20260810T120000Z-improve-readme",
+    task: "Improve README.md",
+    workStatus: "completed",
+  });
+  const successor = note({
+    id: "20260810T120100Z-improve-readme",
+    task: "Improve README.md",
+    timestamp: "2026-08-10T12:01:00Z",
+    workStatus: "completed",
+    supersedes: [first.id],
+  });
+
+  assert.equal(await syncRoadmapProjection(root, [first, successor]), "updated");
+  const written = await readFile(path.join(root, "ROADMAP.md"), "utf8");
+  assert.equal(written.match(/- \[x\] Improve README\.md/g)?.length, 1);
+});
+
 test("roadmap projection leaves a roadmap without ad-hoc notes untouched", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "orchbun-projection-empty-"));
   await writeFile(path.join(root, "ROADMAP.md"), "# Roadmap\n\n## A — Foundation\n\n- [ ] **HEX-A1** Step.\n");
